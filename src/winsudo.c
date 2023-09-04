@@ -1265,49 +1265,18 @@ int main(void) {
   } else {
     bSuccess = CreateProcessW((ReadEnvironmentVariable(L"ComSpec", (wchar_t*)buf, 2048) ? (wchar_t*)buf : L"cmd.exe"), cmdline ? cmdline : L"/d/x/v:off", NULL, NULL, TRUE, dwFlags, lpEnvironment, NULL, &si, &pi);
   }
+  dwErr = GetLastError();
+  if (useenv) DestroyEnvironmentBlock(lpEnvironment);
+  if (cmdline) LocalFree(cmdline);
   if (!bSuccess) {
     if (verbosity > 0) {
-      dwErr = GetLastError();
       if (access > 0) fmt_error("[!] advapi32:CreateProcessWithTokenW() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
       else fmt_error("[!] kernel32:CreateProcessW() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
       perr("[!] Could not create elevated process. Exiting...\r\n");
     }
-    if (useenv) DestroyEnvironmentBlock(lpEnvironment);
-    if (cmdline) {
-      LocalFree(cmdline);
-      if (!new) {
-        CloseHandle(out_read);
-        out_read = INVALID_HANDLE_VALUE;
-        CloseHandle(err_read);
-        err_read = INVALID_HANDLE_VALUE;
-        CloseHandle(in_read);
-        in_read = INVALID_HANDLE_VALUE;
-        CloseHandle(out_write);
-        out_write = INVALID_HANDLE_VALUE;
-        CloseHandle(err_write);
-        err_write = INVALID_HANDLE_VALUE;
-        CloseHandle(in_write);
-        in_write = INVALID_HANDLE_VALUE;
-      }
-    }
-    if (pipe) {
-      CloseHandle(hStdOut);
-      hStdOut = INVALID_HANDLE_VALUE;
-      hStdErr = INVALID_HANDLE_VALUE;
-      CloseHandle(hStdIn);
-      hStdIn = INVALID_HANDLE_VALUE;
-    }
-    if (access > 0) {
-      CloseHandle(hToken);
-      CloseHandle(hNewToken);
-    }
-    ExitProcess(-1);
-  }
-  if (verbosity == 2) perr("[+] Success\r\n");
-  if (useenv) DestroyEnvironmentBlock(lpEnvironment);
-  if (cmdline) {
-    LocalFree(cmdline);
-
+    exit_code = -1;
+  } else {
+    if (verbosity == 2) perr("[+] Success\r\n");
     if (!new) {
       __stosb(buf, 0, 4096);
       if (!pipe) {
@@ -1316,19 +1285,22 @@ int main(void) {
         hStdErr = GetStdHandle(STD_ERROR_HANDLE);
       }
       MarioLoop(buf, pi.hProcess, out_read, err_read, hStdIn, hStdOut, hStdErr, in_write);
-      CloseHandle(out_read);
-      out_read = INVALID_HANDLE_VALUE;
-      CloseHandle(err_read);
-      err_read = INVALID_HANDLE_VALUE;
-      CloseHandle(in_read);
-      in_read = INVALID_HANDLE_VALUE;
-      CloseHandle(out_write);
-      out_write = INVALID_HANDLE_VALUE;
-      CloseHandle(err_write);
-      err_write = INVALID_HANDLE_VALUE;
-      CloseHandle(in_write);
-      in_write = INVALID_HANDLE_VALUE;
     }
+  }
+
+  if (!new) {
+    CloseHandle(out_read);
+    out_read = INVALID_HANDLE_VALUE;
+    CloseHandle(err_read);
+    err_read = INVALID_HANDLE_VALUE;
+    CloseHandle(in_read);
+    in_read = INVALID_HANDLE_VALUE;
+    CloseHandle(out_write);
+    out_write = INVALID_HANDLE_VALUE;
+    CloseHandle(err_write);
+    err_write = INVALID_HANDLE_VALUE;
+    CloseHandle(in_write);
+    in_write = INVALID_HANDLE_VALUE;
   }
 
   if (pipe) {
@@ -1339,18 +1311,19 @@ int main(void) {
     hStdIn = INVALID_HANDLE_VALUE;
   }
 
-  if (wait) {
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    GetExitCodeProcess(pi.hProcess, &exit_code);
+  if (bSuccess) {
+    if (wait) {
+      WaitForSingleObject(pi.hProcess, INFINITE);
+      GetExitCodeProcess(pi.hProcess, &exit_code);
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
   }
 
   if (access > 0) {
     CloseHandle(hToken);
     CloseHandle(hNewToken);
   }
-
-  CloseHandle(pi.hThread);
-  CloseHandle(pi.hProcess);
 
   ExitProcess(exit_code);
 }
