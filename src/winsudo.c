@@ -16,52 +16,16 @@
 #pragma comment (lib, "userenv.lib")
 #pragma intrinsic (strlen, wcslen, wcscpy, wcscat)
 
-#define countof(x) (sizeof(x)/sizeof(x[0]))
-
 #ifndef VERSION_STR
 #error VERSION_STR undefined
 #endif
 
+#define countof(x) (sizeof(x)/sizeof(x[0]))
+#define VAR_SID(x) struct _sid_##x {BYTE Revision; BYTE SubAuthorityCount; SID_IDENTIFIER_AUTHORITY IdentifierAuthority; DWORD SubAuthority[x];}
+#define VAR_TKP(x) struct _tkp_##x {DWORD PrivilegeCount; LUID_AND_ATTRIBUTES Privileges[x];}
+
 static HANDLE g_hStdOut = 0;
 static HANDLE g_hStdErr = 0;
-
-static const char* allPriv[] = {
-  "SeAssignPrimaryTokenPrivilege",
-  "SeAuditPrivilege",
-  "SeBackupPrivilege",
-  "SeChangeNotifyPrivilege",
-  "SeCreateGlobalPrivilege",
-  "SeCreatePagefilePrivilege",
-  "SeCreatePermanentPrivilege",
-  "SeCreateSymbolicLinkPrivilege",
-  "SeCreateTokenPrivilege",
-  "SeDebugPrivilege",
-  "SeDelegateSessionUserImpersonatePrivilege",
-  "SeEnableDelegationPrivilege",
-  "SeImpersonatePrivilege",
-  "SeIncreaseBasePriorityPrivilege",
-  "SeIncreaseQuotaPrivilege",
-  "SeIncreaseWorkingSetPrivilege",
-  "SeLoadDriverPrivilege",
-  "SeLockMemoryPrivilege",
-  "SeMachineAccountPrivilege",
-  "SeManageVolumePrivilege",
-  "SeProfileSingleProcessPrivilege",
-  "SeRelabelPrivilege",
-  "SeRemoteShutdownPrivilege",
-  "SeRestorePrivilege",
-  "SeSecurityPrivilege",
-  "SeShutdownPrivilege",
-  "SeSyncAgentPrivilege",
-  "SeSystemEnvironmentPrivilege",
-  "SeSystemProfilePrivilege",
-  "SeSystemtimePrivilege",
-  "SeTakeOwnershipPrivilege",
-  "SeTcbPrivilege",
-  "SeTimeZonePrivilege",
-  "SeTrustedCredManAccessPrivilege",
-  "SeUndockPrivilege"
-};
 
 static const char* sysProcs[] = {
   "winlogon.exe",
@@ -76,14 +40,52 @@ static const char* sysProcs[] = {
   "logonui.exe"
 };
 
-static DWORD sid_admin[] = {2, 32, 544, 0, 0, 0, 0};
-static DWORD sid_system[] = {1, 18, 0, 0, 0, 0, 0};
-static DWORD sid_ti[] = {6, 80, 956008885, 3418522649, 1831038044, 1853292631, 2271478464};
+VAR_SID(1) sid_system = {1, 1, {0, 0, 0, 0, 0, 5}, {18}};
+VAR_SID(2) sid_admin = {1, 2, {0, 0, 0, 0, 0, 5}, {32, 544}};
+VAR_SID(6) sid_ti = {1, 6, {0, 0, 0, 0, 0, 5}, {80, 956008885, 3418522649, 1831038044, 1853292631, 2271478464}};
 
-struct token_privileges {
-  DWORD PrivilegeCount;
-  LUID_AND_ATTRIBUTES Privileges[countof(allPriv)];
-} tkp;
+VAR_TKP(2) tkp_impersonate = {2, {
+  {{20, 0}, 2}, // SeDebugPrivilege
+  {{29, 0}, 2}  // SeImpersonatePrivilege
+}};
+
+VAR_TKP(35) tkp_all = {35, {
+  {{2, 0}, 2},  // SeCreateTokenPrivilege
+  {{3, 0}, 2},  // SeAssignPrimaryTokenPrivilege
+  {{4, 0}, 2},  // SeLockMemoryPrivilege
+  {{5, 0}, 2},  // SeIncreaseQuotaPrivilege
+  {{6, 0}, 2},  // SeMachineAccountPrivilege
+  {{7, 0}, 2},  // SeTcbPrivilege
+  {{8, 0}, 2},  // SeSecurityPrivilege
+  {{9, 0}, 2},  // SeTakeOwnershipPrivilege
+  {{10, 0}, 2}, // SeLoadDriverPrivilege
+  {{11, 0}, 2}, // SeSystemProfilePrivilege
+  {{12, 0}, 2}, // SeSystemtimePrivilege
+  {{13, 0}, 2}, // SeProfileSingleProcessPrivilege
+  {{14, 0}, 2}, // SeIncreaseBasePriorityPrivilege
+  {{15, 0}, 2}, // SeCreatePagefilePrivilege
+  {{16, 0}, 2}, // SeCreatePermanentPrivilege
+  {{17, 0}, 2}, // SeBackupPrivilege
+  {{18, 0}, 2}, // SeRestorePrivilege
+  {{19, 0}, 2}, // SeShutdownPrivilege
+  {{20, 0}, 2}, // SeDebugPrivilege
+  {{21, 0}, 2}, // SeAuditPrivilege
+  {{22, 0}, 2}, // SeSystemEnvironmentPrivilege
+  {{23, 0}, 2}, // SeChangeNotifyPrivilege
+  {{24, 0}, 2}, // SeRemoteShutdownPrivilege
+  {{25, 0}, 2}, // SeUndockPrivilege
+  {{26, 0}, 2}, // SeSyncAgentPrivilege
+  {{27, 0}, 2}, // SeEnableDelegationPrivilege
+  {{28, 0}, 2}, // SeManageVolumePrivilege
+  {{29, 0}, 2}, // SeImpersonatePrivilege
+  {{30, 0}, 2}, // SeCreateGlobalPrivilege
+  {{31, 0}, 2}, // SeTrustedCredManAccessPrivilege
+  {{32, 0}, 2}, // SeRelabelPrivilege
+  {{33, 0}, 2}, // SeIncreaseWorkingSetPrivilege
+  {{34, 0}, 2}, // SeTimeZonePrivilege
+  {{35, 0}, 2}, // SeCreateSymbolicLinkPrivilege
+  {{36, 0}, 2}  // SeDelegateSessionUserImpersonatePrivilege
+}};
 
 __forceinline static int __stricmp(const char* s1, const char* s2) {
   char c1, c2;
@@ -180,11 +182,6 @@ __forceinline static BOOL EnableImpersonatePriv(int verbosity) {
   HANDLE hToken;
   DWORD dwErr;
 
-  __stosb((PBYTE)&tkp, 0, sizeof(struct token_privileges));
-  tkp.PrivilegeCount = 2;
-  tkp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-  tkp.Privileges[1].Attributes = SE_PRIVILEGE_ENABLED;
-
   if (!OpenProcessToken((HANDLE)-1, TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES, &hToken)) {
     if (verbosity > 0)  {
       dwErr = GetLastError();
@@ -193,16 +190,7 @@ __forceinline static BOOL EnableImpersonatePriv(int verbosity) {
     return FALSE;
   }
 
-  if (!LookupPrivilegeValueA(NULL, "SeDebugPrivilege", &tkp.Privileges[0].Luid) || !LookupPrivilegeValueA(NULL, "SeImpersonatePrivilege", &tkp.Privileges[1].Luid)) {
-    if (verbosity > 0)  {
-      dwErr = GetLastError();
-      fmt_error("[!] advapi32:LookupPrivilegeValueA() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
-    }
-    CloseHandle(hToken);
-    return FALSE;
-  }
-
-  AdjustTokenPrivileges(hToken, FALSE, (TOKEN_PRIVILEGES*)&tkp, 0, NULL, NULL);
+  AdjustTokenPrivileges(hToken, FALSE, (TOKEN_PRIVILEGES*)&tkp_impersonate, 0, NULL, NULL);
   dwErr = GetLastError();
   CloseHandle(hToken);
 
@@ -217,25 +205,8 @@ __forceinline static BOOL EnableImpersonatePriv(int verbosity) {
 
 __forceinline static BOOL EnableAllPriv(HANDLE hToken, int verbosity) {
   DWORD dwErr;
-  unsigned int i;
 
-  __stosb((PBYTE)&tkp, 0, sizeof(struct token_privileges));
-  for (i = 0; i < countof(allPriv); i++) {
-    tkp.Privileges[tkp.PrivilegeCount].Attributes = SE_PRIVILEGE_ENABLED;
-
-    if (!LookupPrivilegeValueA(NULL, allPriv[i], &tkp.Privileges[tkp.PrivilegeCount].Luid)) {
-      dwErr = GetLastError();
-      if (dwErr != ERROR_NO_SUCH_PRIVILEGE) {
-        if (verbosity > 0)
-          fmt_error("[!] advapi32:LookupPrivilegeValueA() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
-        return FALSE;
-      }
-    } else {
-      tkp.PrivilegeCount++;
-    }
-  }
-
-  AdjustTokenPrivileges(hToken, FALSE, (TOKEN_PRIVILEGES*)&tkp, 0, NULL, NULL);
+  AdjustTokenPrivileges(hToken, FALSE, (TOKEN_PRIVILEGES*)&tkp_all, 0, NULL, NULL);
   dwErr = GetLastError();
 
   if (dwErr != ERROR_SUCCESS && dwErr != ERROR_NOT_ALL_ASSIGNED) {
@@ -271,41 +242,30 @@ __forceinline static HANDLE GetAccessToken(DWORD pid, int verbosity) {
   return hToken;
 }
 
-static BOOL IsSidToken(HANDLE hToken, DWORD* sid, int verbosity) {
-  PSID pSID = NULL;
-  BOOL bSuccess = FALSE;
+static BOOL IsSidToken(HANDLE hToken, PSID pSID, int verbosity) {
   BOOL bIsMember = FALSE;
   DWORD dwErr;
-  SID_IDENTIFIER_AUTHORITY NtAuthority = SECURITY_NT_AUTHORITY;
 
-  if (AllocateAndInitializeSid(&NtAuthority, (BYTE)sid[0], sid[1], sid[2], sid[3], sid[4], sid[5], sid[6], 0, 0, &pSID)) {
-    if (CheckTokenMembership(hToken, pSID, &bIsMember)) {
-      bSuccess = TRUE;
-    } else if (verbosity > 0) {
+  if (!CheckTokenMembership(hToken, pSID, &bIsMember)) {
+    if (verbosity > 0) {
       dwErr = GetLastError();
       fmt_error("[!] advapi32:CheckTokenMembership() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
     }
-  } else if (verbosity > 0) {
-    dwErr = GetLastError();
-    fmt_error("[!] advapi32:AllocateAndInitializeSid() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
+    return FALSE;
   }
-  if (pSID) {
-    FreeSid(pSID);
-    pSID = NULL;
-  }
-  return (bSuccess && bIsMember);
+  return bIsMember;
 }
 
 __forceinline static BOOL IsAdminToken(HANDLE hToken, int verbosity) {
-  return IsSidToken(hToken, sid_admin, verbosity);
+  return IsSidToken(hToken, &sid_admin, verbosity);
 }
 
 __forceinline static BOOL IsSystemToken(HANDLE hToken, int verbosity) {
-  return IsSidToken(hToken, sid_system, verbosity);
+  return IsSidToken(hToken, &sid_system, verbosity);
 }
 
 __forceinline static BOOL IsTIToken(HANDLE hToken, int verbosity) {
-  return IsSidToken(hToken, sid_ti, verbosity);
+  return IsSidToken(hToken, &sid_ti, verbosity);
 }
 
 static DWORD GetPIDForProcess(const char* process) {
@@ -326,8 +286,8 @@ static DWORD GetPIDForProcess(const char* process) {
         }
       } while (Process32Next(hSnapshot,&lppe));
     }
-  }
   CloseHandle(hSnapshot);
+  }
   return pid;
 }
 
@@ -742,7 +702,7 @@ int main(void) {
 
   g_hStdOut = GetStdHandle(STD_OUTPUT_HANDLE);
   g_hStdErr = GetStdHandle(STD_ERROR_HANDLE);
-  
+
 #ifndef _WIN64
   if (Is64BitOS()) {
     perr("[!] Processor architecture mismatch; sudo=x86, OS=x64\r\n\r\n");
