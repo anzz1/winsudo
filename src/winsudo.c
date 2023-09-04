@@ -1063,6 +1063,11 @@ int main(void) {
       RunAs(buf, cmdline, (!new || verbosity > 0), wait, verbosity);
     } else {
       if (verbosity > 0) perr("[!] Could not acquire administrator privileges. Exiting...\r\n");
+      CloseHandle(hStdOut);
+      hStdOut = INVALID_HANDLE_VALUE;
+      hStdErr = INVALID_HANDLE_VALUE;
+      CloseHandle(hStdIn);
+      hStdIn = INVALID_HANDLE_VALUE;
       ExitProcess(-1);
     }
   } else if (pipe && verbosity == 2) {
