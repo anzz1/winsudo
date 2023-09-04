@@ -1,0 +1,92 @@
+name: ci
+
+on:
+  workflow_dispatch: # allows manual triggering
+    inputs:
+      create_release:
+        description: 'Create new release'
+        required: true
+        type: boolean
+      scrub_old_releases:
+        description: 'Scrub old releases'
+        required: true
+        type: boolean
+  push:
+    paths: ['.github/workflows/**', '.github/*.sh', '**/premake5.lua', '**/*.h', '**/*.c']
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths: ['**/premake5.lua', '**/*.h', '**/*.c']
+
+env:
+  SOLUTION_FILE_PATH: ./build/winsudo.sln
+  BUILD_CONFIGURATION: Release
+
+jobs:
+  build:
+    name: build-windows
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout the repository
+      id: checkout
+      uses: actions/checkout@v3
+
+    - name: Get version tag
+      id: get_tag
+      if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/master' ) || github.event.inputs.create_release == 'true' }}
+      shell: bash
+      run: |
+        chmod +x ./.github/tag.sh
+        ./.github/tag.sh
+
+    - name: Run premake '5.0.0-beta2'
+      id: run_premake
+      uses: eariassoto/setup-premake@v1
+      with:
+        version: '5.0.0-beta2'
+        action: 'vs2022'
+
+    - name: Add MSBuild to PATH
+      id: setup_msbuild
+      uses: microsoft/setup-msbuild@v1.0.2
+
+    - name: Build
+      id: run_msbuild
+      working-directory: ${{env.GITHUB_WORKSPACE}}
+      run: msbuild /m /p:Platform=Win32 /p:Configuration=${{env.BUILD_CONFIGURATION}} ${{env.SOLUTION_FILE_PATH}} && msbuild /m /p:Platform=x64 /p:Configuration=${{env.BUILD_CONFIGURATION}} ${{env.SOLUTION_FILE_PATH}}  
+
+    - name: Pack artifacts
+      id: pack_artifacts
+      if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/master' ) || github.event.inputs.create_release == 'true' }}
+      run: |
+        7z a winsudo.zip .\bin\*
+
+    - name: Create release
+      id: create_release
+      if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/master' ) || github.event.inputs.create_release == 'true' }}
+      uses: anzz1/action-create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ env.RELEASE_TAG }}
+
+    - name: Upload release
+      id: upload_release
+      if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/master' ) || github.event.inputs.create_release == 'true' }}
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }} 
+        asset_path: .\winsudo.zip
+        asset_name: winsudo.zip
+        asset_content_type: application/zip
+
+    - name: Scrub old releases
+      id: scrub_old_releases
+      if: ${{ github.event.inputs.scrub_old_releases == 'true' }}
+      uses: dev-drprasad/delete-older-releases@v0.2.1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        keep_latest: 1
