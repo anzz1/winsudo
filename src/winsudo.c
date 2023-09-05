@@ -28,14 +28,14 @@ static HANDLE g_hStdOut = 0;
 static HANDLE g_hStdErr = 0;
 
 static const char* sysProcs[] = {
-  "winlogon.exe",
   "lsass.exe",
-  "lsm.exe",
-  "wininit.exe",
   "smss.exe",
   "csrss.exe",
-  "services.exe",
+  "lsm.exe",
   "wmiprvse.exe",
+  "services.exe",
+  "winlogon.exe",
+  "wininit.exe",
   "trustedinstaller.exe",
   "logonui.exe"
 };

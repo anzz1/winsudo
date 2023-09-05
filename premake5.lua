@@ -45,7 +45,6 @@ if _ACTION and _ACTION >= "vs2010" then
     local calls = base(prj)
     table.insert(calls, function() premake.vstudio.vc2010.element("SDLCheck", nil, "false") end)
     table.insert(calls, function() premake.vstudio.vc2010.element("ControlFlowGuard", nil, "false") end)
-    table.insert(calls, function() premake.vstudio.vc2010.element("GuardEHContMetadata", nil, "false") end)
     return calls
   end)
   premake.override(premake.vstudio.vc2010.elements, "link", function(base, prj)
