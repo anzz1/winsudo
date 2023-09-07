@@ -7,6 +7,10 @@ int __stdcall DllMain(HANDLE hModule, DWORD ul_reason_for_call, LPVOID lpReserve
   return 1;
 }
 
+__declspec(dllexport) long __stdcall RtlGetVersion(PRTL_OSVERSIONINFOW lpVersionInformation) {
+  return 1;
+}
+
 __declspec(dllexport) long __stdcall ZwCreateToken(
   PHANDLE              TokenHandle,
   ACCESS_MASK          DesiredAccess,

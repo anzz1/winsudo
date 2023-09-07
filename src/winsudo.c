@@ -34,6 +34,8 @@ typedef struct _OBJECT_ATTRIBUTES {
   PVOID           SecurityQualityOfService;
 } OBJECT_ATTRIBUTES, * POBJECT_ATTRIBUTES;
 
+extern __declspec(dllimport) long __stdcall RtlGetVersion(PRTL_OSVERSIONINFOW lpVersionInformation);
+
 extern __declspec(dllimport) long __stdcall ZwCreateToken(
   PHANDLE              TokenHandle,
   ACCESS_MASK          DesiredAccess,
@@ -491,7 +493,6 @@ static HANDLE CreateUserToken(HANDLE base_token, int verbosity) {
   PTOKEN_GROUPS groups, groups2;
   PTOKEN_PRIMARY_GROUP primary_group;
   PTOKEN_DEFAULT_DACL default_dacl;
-  PTOKEN_PRIVILEGES privileges;
   SECURITY_QUALITY_OF_SERVICE sqos = { sizeof(sqos), SecurityDelegation, SECURITY_STATIC_TRACKING, FALSE };
   OBJECT_ATTRIBUTES oa = { sizeof(oa), 0, 0, 0, 0, &sqos };
   TOKEN_SOURCE source = { {'C', 'r', 'e', 'd', 'P', 'r', 'o', 0}, {0, 0} };
@@ -516,9 +517,6 @@ static HANDLE CreateUserToken(HANDLE base_token, int verbosity) {
         default_dacl = (PTOKEN_DEFAULT_DACL)GetInfoFromToken(base_token, TokenDefaultDacl, verbosity);
         if (default_dacl) {
           BYTE* grpCopy = LocalAlloc(LPTR, groups->GroupCount);
-          privileges = (PTOKEN_PRIVILEGES)LocalAlloc(LPTR, sizeof(tkp_all));
-          __movsb((unsigned char*)privileges, (unsigned const char*)&tkp_all, sizeof(tkp_all));
-          privileges->PrivilegeCount = 34;
 
           DWORD grpCount = tkg_good.GroupCount + tkg_xtra.GroupCount;
           for (i = 0, y = 0; i < tkg_xtra.GroupCount; i++) {
@@ -559,10 +557,9 @@ static HANDLE CreateUserToken(HANDLE base_token, int verbosity) {
           }
 
           ntStatus = ZwCreateToken(&user_token, TOKEN_ALL_ACCESS, &oa, TokenImpersonation, &authid, &li, &user, groups2,
-            privileges, &owner, primary_group, default_dacl, &source);
+            (PTOKEN_PRIVILEGES)&tkp_all, &owner, primary_group, default_dacl, &source);
 
           LocalFree(groups2);
-          LocalFree(privileges);
           LocalFree(grpCopy);
           LocalFree(default_dacl);
           if (ntStatus && verbosity > 0)
@@ -866,6 +863,14 @@ __forceinline static HANDLE GetStdInPipe(DWORD pipe) {
   return CreateFileA(buf, FILE_READ_DATA|SYNCHRONIZE, 0, &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
 }
 
+__forceinline static DWORD OSMajorVersion() {
+  OSVERSIONINFOW info;
+  __stosb((PBYTE)&info, 0, sizeof(OSVERSIONINFOW));
+  info.dwOSVersionInfoSize = sizeof(OSVERSIONINFOW);
+  RtlGetVersion(&info);
+  return info.dwMajorVersion;
+}
+
 #ifndef _WIN64
 __forceinline static BOOL Is64BitOS(void) {
   void* fnIsWow64Process;
@@ -934,6 +939,9 @@ int main(void) {
     ExitProcess(-2);
   }
 #endif // !_WIN64
+
+  if (OSMajorVersion() < 10)
+    tkp_all.PrivilegeCount = 34;
 
   dirlen = GetCurrentDirectoryW(0,0);
   if (!dirlen) {
