@@ -25,19 +25,31 @@ workspace "winsudo"
 
   filter "platforms:Win32"
     architecture "x86"
-    targetdir "bin/Win32"
 
   filter "platforms:x64"
     architecture "x64"
-    targetdir "bin/x64"
+
+project "ntdll_lib_stub"
+  kind "SharedLib"
+  language "C"
+  targetname "ntdll"
+  targetextension ".dll"
+  targetdir "build/obj"
+  files { "src/ntdll_lib_stub.c", "src/ntdll.def" }
+  entrypoint "DllMain"
 
 project "winsudo"
   kind "ConsoleApp"
   language "C"
+  targetname "sudo"
   targetextension ".exe"
   files { "src/winsudo.c", "src/version.h" }
+  dependson { "ntdll_lib_stub" }
   entrypoint "main"
-  targetname "sudo"
+  filter "platforms:Win32"
+    targetdir "bin/Win32"
+  filter "platforms:x64"
+    targetdir "bin/x64"
 
 if _ACTION and _ACTION >= "vs2010" then
   require "vstudio"

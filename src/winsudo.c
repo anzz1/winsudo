@@ -14,6 +14,7 @@
 #include "version.h"
 
 #pragma comment (lib, "userenv.lib")
+#pragma comment (lib, "ntdll.lib")
 #pragma intrinsic (strlen, wcslen, wcscpy, wcscat)
 
 #ifndef VERSION_STR
@@ -23,6 +24,31 @@
 #define countof(x) (sizeof(x)/sizeof(x[0]))
 #define VAR_SID(x) struct _sid_##x {BYTE Revision; BYTE SubAuthorityCount; SID_IDENTIFIER_AUTHORITY IdentifierAuthority; DWORD SubAuthority[x];}
 #define VAR_TKP(x) struct _tkp_##x {DWORD PrivilegeCount; LUID_AND_ATTRIBUTES Privileges[x];}
+
+typedef struct _OBJECT_ATTRIBUTES {
+  ULONG           Length;
+  HANDLE          RootDirectory;
+  PVOID           ObjectName;
+  ULONG           Attributes;
+  PVOID           SecurityDescriptor;
+  PVOID           SecurityQualityOfService;
+} OBJECT_ATTRIBUTES, * POBJECT_ATTRIBUTES;
+
+extern __declspec(dllimport) long __stdcall ZwCreateToken(
+  PHANDLE              TokenHandle,
+  ACCESS_MASK          DesiredAccess,
+  POBJECT_ATTRIBUTES   ObjectAttributes,
+  TOKEN_TYPE           TokenType,
+  PLUID                AuthenticationId,
+  PLARGE_INTEGER       ExpirationTime,
+  PTOKEN_USER          TokenUser,
+  PTOKEN_GROUPS        TokenGroups,
+  PTOKEN_PRIVILEGES    TokenPrivileges,
+  PTOKEN_OWNER         TokenOwner,
+  PTOKEN_PRIMARY_GROUP TokenPrimaryGroup,
+  PTOKEN_DEFAULT_DACL  TokenDefaultDacl,
+  PTOKEN_SOURCE        TokenSource
+);
 
 static HANDLE g_hStdOut = 0;
 static HANDLE g_hStdErr = 0;
@@ -40,51 +66,114 @@ static const char* sysProcs[] = {
   "logonui.exe"
 };
 
-VAR_SID(1) sid_system = {1, 1, {0, 0, 0, 0, 0, 5}, {18}};
-VAR_SID(2) sid_admin = {1, 2, {0, 0, 0, 0, 0, 5}, {32, 544}};
-VAR_SID(6) sid_ti = {1, 6, {0, 0, 0, 0, 0, 5}, {80, 956008885, 3418522649, 1831038044, 1853292631, 2271478464}};
+VAR_SID(1)
+  sid_system = {1, 1, {0, 0, 0, 0, 0, 5}, {18}},
+  sid_everyone = {1, 1, {0, 0, 0, 0, 0, 1}, {0}},
+  sid_local = {1, 1, {0, 0, 0, 0, 0, 2}, {0}},
+  sid_console = {1, 1, {0, 0, 0, 0, 0, 2}, {1}},
+  sid_interactive = {1, 1, {0, 0, 0, 0, 0, 5}, {4}},
+  sid_service = {1, 1, {0, 0, 0, 0, 0, 5}, {6}},
+  sid_authed = {1, 1, {0, 0, 0, 0, 0, 5}, {11}},
+  sid_localorg = {1, 1, {0, 0, 0, 0, 0, 5}, {15}},
+  sid_localacc = {1, 1, {0, 0, 0, 0, 0, 5}, {113}},
+  sid_localadmin = {1, 1, {0, 0, 0, 0, 0, 5}, {114}};
 
-VAR_TKP(2) tkp_impersonate = {2, {
-  {{20, 0}, 2}, // SeDebugPrivilege
-  {{29, 0}, 2}  // SeImpersonatePrivilege
+VAR_SID(2)
+  sid_admins = {1, 2, {0, 0, 0, 0, 0, 5}, {32, 544}},
+  sid_users = {1, 2, {0, 0, 0, 0, 0, 5}, {32, 545}},
+  sid_bakops = {1, 2, {0, 0, 0, 0, 0, 5}, {32, 551}},
+  sid_netconf = {1, 2, {0, 0, 0, 0, 0, 5}, {32, 556}},
+  sid_perflog = {1, 2, {0, 0, 0, 0, 0, 5}, {32, 559}},
+  sid_authg = {1, 2, {0, 0, 0, 0, 0, 5}, {32, 560}},
+  sid_dcom = {1, 2, {0, 0, 0, 0, 0, 5}, {32, 562}},
+  sid_crypt = {1, 2, {0, 0, 0, 0, 0, 5}, {32, 569}},
+  sid_evlog = {1, 2, {0, 0, 0, 0, 0, 5}, {32, 573}},
+  sid_hyperv = {1, 2, {0, 0, 0, 0, 0, 5}, {32, 578}},
+  sid_sysman = {1, 2, {0, 0, 0, 0, 0, 5}, {32, 581}},
+  sid_devown = {1, 2, {0, 0, 0, 0, 0, 5}, {32, 583}},
+  sid_ntlm = {1, 2, {0, 0, 0, 0, 0, 5}, {64, 10}};
+
+VAR_SID(6)
+  sid_ti = {1, 6, {0, 0, 0, 0, 0, 5}, {80, 956008885, 3418522649, 1831038044, 1853292631, 2271478464}};
+
+VAR_TKP(2)
+  tkp_impersonate = {2, {
+    {{20, 0}, 2}, // SeDebugPrivilege
+    {{29, 0}, 2}  // SeImpersonatePrivilege
+  }};
+
+VAR_TKP(35)
+  tkp_all = {35, {
+    {{2, 0}, 2},  // SeCreateTokenPrivilege
+    {{3, 0}, 2},  // SeAssignPrimaryTokenPrivilege
+    {{4, 0}, 2},  // SeLockMemoryPrivilege
+    {{5, 0}, 2},  // SeIncreaseQuotaPrivilege
+    {{6, 0}, 2},  // SeMachineAccountPrivilege
+    {{7, 0}, 2},  // SeTcbPrivilege
+    {{8, 0}, 2},  // SeSecurityPrivilege
+    {{9, 0}, 2},  // SeTakeOwnershipPrivilege
+    {{10, 0}, 2}, // SeLoadDriverPrivilege
+    {{11, 0}, 2}, // SeSystemProfilePrivilege
+    {{12, 0}, 2}, // SeSystemtimePrivilege
+    {{13, 0}, 2}, // SeProfileSingleProcessPrivilege
+    {{14, 0}, 2}, // SeIncreaseBasePriorityPrivilege
+    {{15, 0}, 2}, // SeCreatePagefilePrivilege
+    {{16, 0}, 2}, // SeCreatePermanentPrivilege
+    {{17, 0}, 2}, // SeBackupPrivilege
+    {{18, 0}, 2}, // SeRestorePrivilege
+    {{19, 0}, 2}, // SeShutdownPrivilege
+    {{20, 0}, 2}, // SeDebugPrivilege
+    {{21, 0}, 2}, // SeAuditPrivilege
+    {{22, 0}, 2}, // SeSystemEnvironmentPrivilege
+    {{23, 0}, 2}, // SeChangeNotifyPrivilege
+    {{24, 0}, 2}, // SeRemoteShutdownPrivilege
+    {{25, 0}, 2}, // SeUndockPrivilege
+    {{26, 0}, 2}, // SeSyncAgentPrivilege
+    {{27, 0}, 2}, // SeEnableDelegationPrivilege
+    {{28, 0}, 2}, // SeManageVolumePrivilege
+    {{29, 0}, 2}, // SeImpersonatePrivilege
+    {{30, 0}, 2}, // SeCreateGlobalPrivilege
+    {{31, 0}, 2}, // SeTrustedCredManAccessPrivilege
+    {{32, 0}, 2}, // SeRelabelPrivilege
+    {{33, 0}, 2}, // SeIncreaseWorkingSetPrivilege
+    {{34, 0}, 2}, // SeTimeZonePrivilege
+    {{35, 0}, 2}, // SeCreateSymbolicLinkPrivilege
+    {{36, 0}, 2}  // SeDelegateSessionUserImpersonatePrivilege
+  }};
+
+struct _token_grp_good {
+  DWORD GroupCount;
+  SID_AND_ATTRIBUTES Groups[13];
+} tkg_good = {13, {
+  {&sid_everyone, 7},
+  {&sid_local, 15},
+  {&sid_console, 7},
+  {&sid_interactive, 7},
+  {&sid_service, 7},
+  {&sid_authed, 7},
+  {&sid_localorg, 7},
+  {&sid_localacc, 7},
+  {&sid_localadmin, 7},
+  {&sid_admins, 15},
+  {&sid_users, 15},
+  {&sid_ntlm, 7},
+  {&sid_ti, 14}
 }};
 
-VAR_TKP(35) tkp_all = {35, {
-  {{2, 0}, 2},  // SeCreateTokenPrivilege
-  {{3, 0}, 2},  // SeAssignPrimaryTokenPrivilege
-  {{4, 0}, 2},  // SeLockMemoryPrivilege
-  {{5, 0}, 2},  // SeIncreaseQuotaPrivilege
-  {{6, 0}, 2},  // SeMachineAccountPrivilege
-  {{7, 0}, 2},  // SeTcbPrivilege
-  {{8, 0}, 2},  // SeSecurityPrivilege
-  {{9, 0}, 2},  // SeTakeOwnershipPrivilege
-  {{10, 0}, 2}, // SeLoadDriverPrivilege
-  {{11, 0}, 2}, // SeSystemProfilePrivilege
-  {{12, 0}, 2}, // SeSystemtimePrivilege
-  {{13, 0}, 2}, // SeProfileSingleProcessPrivilege
-  {{14, 0}, 2}, // SeIncreaseBasePriorityPrivilege
-  {{15, 0}, 2}, // SeCreatePagefilePrivilege
-  {{16, 0}, 2}, // SeCreatePermanentPrivilege
-  {{17, 0}, 2}, // SeBackupPrivilege
-  {{18, 0}, 2}, // SeRestorePrivilege
-  {{19, 0}, 2}, // SeShutdownPrivilege
-  {{20, 0}, 2}, // SeDebugPrivilege
-  {{21, 0}, 2}, // SeAuditPrivilege
-  {{22, 0}, 2}, // SeSystemEnvironmentPrivilege
-  {{23, 0}, 2}, // SeChangeNotifyPrivilege
-  {{24, 0}, 2}, // SeRemoteShutdownPrivilege
-  {{25, 0}, 2}, // SeUndockPrivilege
-  {{26, 0}, 2}, // SeSyncAgentPrivilege
-  {{27, 0}, 2}, // SeEnableDelegationPrivilege
-  {{28, 0}, 2}, // SeManageVolumePrivilege
-  {{29, 0}, 2}, // SeImpersonatePrivilege
-  {{30, 0}, 2}, // SeCreateGlobalPrivilege
-  {{31, 0}, 2}, // SeTrustedCredManAccessPrivilege
-  {{32, 0}, 2}, // SeRelabelPrivilege
-  {{33, 0}, 2}, // SeIncreaseWorkingSetPrivilege
-  {{34, 0}, 2}, // SeTimeZonePrivilege
-  {{35, 0}, 2}, // SeCreateSymbolicLinkPrivilege
-  {{36, 0}, 2}  // SeDelegateSessionUserImpersonatePrivilege
+struct _token_grp_extra {
+  DWORD GroupCount;
+  SID_AND_ATTRIBUTES Groups[10];
+} tkg_xtra = {10, {
+  {&sid_bakops, 15},
+  {&sid_netconf, 15},
+  {&sid_perflog, 15},
+  {&sid_authg, 15},
+  {&sid_dcom, 15},
+  {&sid_crypt, 15},
+  {&sid_evlog, 15},
+  {&sid_hyperv, 15},
+  {&sid_sysman, 15},
+  {&sid_devown, 15}
 }};
 
 __forceinline static int __stricmp(const char* s1, const char* s2) {
@@ -257,7 +346,7 @@ static BOOL IsSidToken(HANDLE hToken, PSID pSID, int verbosity) {
 }
 
 __forceinline static BOOL IsAdminToken(HANDLE hToken, int verbosity) {
-  return IsSidToken(hToken, &sid_admin, verbosity);
+  return IsSidToken(hToken, &sid_admins, verbosity);
 }
 
 __forceinline static BOOL IsSystemToken(HANDLE hToken, int verbosity) {
@@ -318,8 +407,6 @@ __forceinline static BOOL GetConsoleBufferSize(int* cols, int* rows) {
 }
 
 static BOOL GetDupToken(const char* pname, PHANDLE phToken, PHANDLE phNewToken, int verbosity) {
-  TOKEN_TYPE tokenImpersonation = TokenImpersonation;
-  SECURITY_IMPERSONATION_LEVEL seImpersonateLevel = SecurityImpersonation;
   DWORD pid;
   DWORD dwErr;
 
@@ -337,7 +424,7 @@ static BOOL GetDupToken(const char* pname, PHANDLE phToken, PHANDLE phNewToken, 
   }
   if (verbosity == 2) perr("[+] Access token acquired\r\n");
 
-  if(!DuplicateTokenEx(*phToken, MAXIMUM_ALLOWED, NULL, seImpersonateLevel, tokenImpersonation, phNewToken)) {
+  if(!DuplicateTokenEx(*phToken, MAXIMUM_ALLOWED, NULL, SecurityImpersonation, TokenImpersonation, phNewToken)) {
     if (verbosity > 0) {
       dwErr = GetLastError();
       fmt_error("[!] advapi32:DuplicateTokenEx() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
@@ -350,6 +437,144 @@ static BOOL GetDupToken(const char* pname, PHANDLE phToken, PHANDLE phNewToken, 
     return FALSE;
   }
   return TRUE;
+}
+
+static BOOL IsGroupSid(PSID pSID, int verbosity) {
+  DWORD cchName = 0xFFFF;
+  DWORD cchRefName = 0xFFFF;
+  SID_NAME_USE eUse = 0;
+  DWORD dwErr;
+  if (!LookupAccountSidA(NULL, pSID, NULL, &cchName, NULL, &cchRefName, &eUse)) {
+    dwErr = GetLastError();
+    if (verbosity > 0 && dwErr != ERROR_NONE_MAPPED)
+      fmt_error("[!] advapi32:LookupAccountSidA() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
+    return FALSE;
+  }
+  switch (eUse) {
+    case SidTypeGroup:
+    case SidTypeAlias:
+    case SidTypeWellKnownGroup:
+      return TRUE;
+    default:
+      return FALSE;
+  }
+}
+
+static LPVOID GetInfoFromToken(HANDLE hToken, TOKEN_INFORMATION_CLASS type, int verbosity) {
+  DWORD dwLength;
+  DWORD dwErr;
+  LPVOID lpData = NULL;
+  if (!GetTokenInformation(hToken, type, NULL, 0, &dwLength)) {
+    dwErr = GetLastError();
+    if (dwErr != ERROR_INSUFFICIENT_BUFFER) {
+      if (verbosity > 0) fmt_error("[!] advapi32:GetTokenInformation() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
+      return NULL;
+    }
+  }
+  lpData = (LPVOID)LocalAlloc(LPTR, dwLength);
+  if (!GetTokenInformation(hToken, type, lpData, dwLength, &dwLength)) {
+    dwErr = GetLastError();
+    if (verbosity > 0) fmt_error("[!] advapi32:GetTokenInformation() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
+    LocalFree(lpData);
+    lpData = NULL;
+  }
+  return lpData;
+}
+
+static HANDLE CreateUserToken(HANDLE base_token, int verbosity) {
+  HANDLE user_token;
+  LUID luid;
+  LARGE_INTEGER li;
+  TOKEN_USER user;
+  TOKEN_OWNER owner;
+  PTOKEN_STATISTICS stats;
+  PTOKEN_GROUPS groups, groups2;
+  PTOKEN_PRIMARY_GROUP primary_group;
+  PTOKEN_DEFAULT_DACL default_dacl;
+  PTOKEN_PRIVILEGES privileges;
+  SECURITY_QUALITY_OF_SERVICE sqos = { sizeof(sqos), SecurityDelegation, SECURITY_STATIC_TRACKING, FALSE };
+  OBJECT_ATTRIBUTES oa = { sizeof(oa), 0, 0, 0, 0, &sqos };
+  TOKEN_SOURCE source = { {'C', 'r', 'e', 'd', 'P', 'r', 'o', 0}, {0, 0} };
+  LUID authid = SYSTEM_LUID;
+  DWORD i, x, y;
+  long ntStatus = -1;
+
+  user.User.Attributes = 0;
+  user.User.Sid = &sid_system;
+  owner.Owner = &sid_system;
+  li.LowPart = 0xFFFFFFFF;
+  li.HighPart = 0xFFFFFFFF;
+  AllocateLocallyUniqueId(&luid);
+  source.SourceIdentifier.LowPart = luid.LowPart;
+  source.SourceIdentifier.HighPart = luid.HighPart;
+  stats = (PTOKEN_STATISTICS)GetInfoFromToken(base_token, TokenStatistics, verbosity);
+  if (stats) {
+    groups = (PTOKEN_GROUPS)GetInfoFromToken(base_token, TokenGroups, verbosity);
+    if (groups) {
+      primary_group = (PTOKEN_PRIMARY_GROUP)GetInfoFromToken(base_token, TokenPrimaryGroup, verbosity);
+      if(primary_group) {
+        default_dacl = (PTOKEN_DEFAULT_DACL)GetInfoFromToken(base_token, TokenDefaultDacl, verbosity);
+        if (default_dacl) {
+          BYTE* grpCopy = LocalAlloc(LPTR, groups->GroupCount);
+          privileges = (PTOKEN_PRIVILEGES)LocalAlloc(LPTR, sizeof(tkp_all));
+          __movsb((unsigned char*)privileges, (unsigned const char*)&tkp_all, sizeof(tkp_all));
+          privileges->PrivilegeCount = 34;
+
+          DWORD grpCount = tkg_good.GroupCount + tkg_xtra.GroupCount;
+          for (i = 0, y = 0; i < tkg_xtra.GroupCount; i++) {
+            if (IsGroupSid(tkg_xtra.Groups[i].Sid, verbosity)) y |= (1 << i);
+            else grpCount--;
+          }
+          for (i = 0; i < groups->GroupCount; i++) {
+            for (x = 0; x < tkg_good.GroupCount; x++) {
+              if (EqualSid(groups->Groups[i].Sid, tkg_good.Groups[x].Sid)) break;
+            }
+            if (x == tkg_good.GroupCount) {
+              for (x = 0; x < tkg_xtra.GroupCount; x++) {
+                if (((y >> x) & 1) && EqualSid(groups->Groups[i].Sid, tkg_xtra.Groups[x].Sid)) break;
+              }
+              if (x == tkg_xtra.GroupCount) {
+                grpCopy[i] = 1;
+                grpCount++;
+              }
+            }
+          }
+          groups2 = (PTOKEN_GROUPS)LocalAlloc(LPTR, 4 + sizeof(SID_AND_ATTRIBUTES) * grpCount);
+          __movsb((unsigned char*)groups2, (unsigned const char*)&tkg_good, sizeof(tkg_good));
+          groups2->GroupCount = grpCount;
+          for (i = 0, x = tkg_good.GroupCount; i < tkg_xtra.GroupCount; i++) {
+            if ((y >> i) & 1)
+              __movsb((unsigned char*)&groups2->Groups[x++], (unsigned const char*)&tkg_xtra.Groups[i], sizeof(SID_AND_ATTRIBUTES));
+          }
+          for (i = 0; i < groups->GroupCount; i++) {
+            if (grpCopy[i]) {
+              PSID_AND_ATTRIBUTES grp = &groups2->Groups[--grpCount];
+              grp->Sid = groups->Groups[i].Sid;
+              grp->Attributes = groups->Groups[i].Attributes;
+              grp->Attributes &= ~SE_GROUP_USE_FOR_DENY_ONLY;
+              // if(IsGroupSid(grp->Sid))
+              if (((PISID)(grp->Sid))->IdentifierAuthority.Value[5] <= 5) // SECURITY_NT_AUTHORITY
+                grp->Attributes |= SE_GROUP_ENABLED;
+            }
+          }
+
+          ntStatus = ZwCreateToken(&user_token, TOKEN_ALL_ACCESS, &oa, TokenImpersonation, &authid, &li, &user, groups2,
+            privileges, &owner, primary_group, default_dacl, &source);
+
+          LocalFree(groups2);
+          LocalFree(privileges);
+          LocalFree(grpCopy);
+          LocalFree(default_dacl);
+          if (ntStatus && verbosity > 0)
+            fmt_error("[!] ntdll:ZwCreateToken() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)ntStatus, (DWORD_PTR)"");
+        }
+        LocalFree(primary_group);
+      }
+      LocalFree(groups);
+    }
+    LocalFree(stats);
+  }
+  return ((ntStatus == 0) ? user_token : NULL);
 }
 
 __forceinline static BOOL DoStartSvc(int verbosity) {
@@ -661,8 +886,6 @@ int main(void) {
   HANDLE hStdIn = NULL;
   HANDLE hStdOut = NULL;
   HANDLE hStdErr = NULL;
-  TOKEN_TYPE tokenPrimary = TokenPrimary;
-  SECURITY_IMPERSONATION_LEVEL seImpersonateLevel = SecurityImpersonation;
   STARTUPINFOW si;
   PROCESS_INFORMATION pi;
   DWORD dwErr;
@@ -677,6 +900,7 @@ int main(void) {
   BOOL allpriv = TRUE;
   BOOL useenv = TRUE;
   BOOL do_test = FALSE;
+  BOOL notoken = FALSE;
   DWORD access = 1;
   DWORD dirlen = 0;
   int w = 0, h = 0, cols = 0, rows = 0;
@@ -692,7 +916,7 @@ int main(void) {
   DWORD dwAvailErr = 0;
   DWORD dwFlags = 0;
   BOOL bSuccess = FALSE;
-  unsigned int i;
+  DWORD i;
   LPVOID lpEnvironment = NULL;
   DWORD pipe = 0;
 
@@ -767,9 +991,10 @@ int main(void) {
               "  -n, --new                 run in a new window\r\n"
               "  -w, --wait                wait for process to exit\r\n"
               "  -z, --hide                hide process window\r\n"
-              "  -e, --noenv               do not pass environment\r\n"
               "  -d, --nocd                do not change directory\r\n"
-              "  -p, --nopriv              do not enable more privileges\r\n"
+              "  -e, --noenv               do not pass environment\r\n"
+              "  -k, --notoken             do not use all-access token\r\n"
+              "  -p, --nopriv              do not enable all privileges\r\n"
               "  -s, --silent              silent output\r\n"
               "  -v, --verbose             verbose output\r\n"
               "      --test                test privileges\r\n\r\n"
@@ -933,6 +1158,20 @@ int main(void) {
         (*(s+13) == L'\0' || *(s+13) == L' ' || *(s+13) == L'\t' || *(s+13) == L'/' || *(s+13) == L'-')) {
         s += 13;
         access = 0;
+      } else if ((*s == L'K' || *s == L'k') &&
+        (*(s+1) == L'\0' || *(s+1) == L' ' || *(s+1) == L'\t' || *(s+1) == L'/' || *(s+1) == L'-')) {
+        s++;
+        notoken = TRUE;
+      } else if ((*s == L'N' || *s == L'n') &&
+        (*(s+1) == L'O' || *(s+1) == L'o') &&
+        (*(s+2) == L'T' || *(s+2) == L't') &&
+        (*(s+3) == L'O' || *(s+3) == L'o') &&
+        (*(s+4) == L'K' || *(s+4) == L'k') &&
+        (*(s+5) == L'E' || *(s+5) == L'e') &&
+        (*(s+6) == L'N' || *(s+6) == L'n') &&
+        (*(s+7) == L'\0' || *(s+7) == L' ' || *(s+7) == L'\t' || *(s+7) == L'/' || *(s+7) == L'-')) {
+        s += 7;
+        notoken = TRUE;
       } else if ((*s == L'S' || *s == L's') &&
         (*(s+1) == L'Y' || *(s+1) == L'y') &&
         (*(s+2) == L'S' || *(s+2) == L's') &&
@@ -1078,9 +1317,9 @@ int main(void) {
     for (i = 0; i < countof(sysProcs); i++) {
       if (GetDupToken(sysProcs[i], &hToken, &hNewToken, verbosity)) {
         if (IsSystemToken(hNewToken, verbosity)) break;
-        if (verbosity > 0) perr("[!] Not a SYSTEM token\r\n");
-        CloseHandle(hNewToken);
-        CloseHandle(hToken);
+        if (verbosity == 2) perr("[!] Not a SYSTEM token\r\n");
+        CloseHandle(hNewToken); hNewToken = NULL;
+        CloseHandle(hToken); hToken = NULL;
       }
     }
 
@@ -1097,30 +1336,48 @@ int main(void) {
       ExitProcess(-1);
     }
 
-    if (access == 2) {
-      CloseHandle(hToken);
-      if (ImpersonateLoggedOnUser(hNewToken)) {
-        CloseHandle(hNewToken);
-        if (!GetPIDForProcess("trustedinstaller.exe")) {
-          if (DoStartSvc(verbosity)) {
-            for (i = 0; i < 500; i++) {
-              if (GetPIDForProcess("trustedinstaller.exe")) break;
-              Sleep(10);
+    if (!notoken || access == 2) {
+      bSuccess = FALSE;
+      if (!ImpersonateLoggedOnUser(hNewToken)) {
+        dwErr = GetLastError();
+        fmt_error("[!] advapi32:ImpersonateLoggedOnUser() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
+      } else {
+        if (!notoken) {
+          HANDLE hUserToken = CreateUserToken(hNewToken, verbosity);
+          if (hUserToken) {
+            bSuccess = TRUE;
+            if (verbosity == 2) perr("[+] All-access token created\r\n");
+            CloseHandle(hNewToken); hNewToken = NULL;
+            CloseHandle(hToken);
+            hToken = hUserToken;
+          } else if (verbosity > 0) {
+            perr("[!] Could not create all-access token\r\n");
+            if (verbosity == 2) {
+              perr("[+] Falling back to ");
+              perr((access == 2) ? "TrustedInstaller" : "SYSTEM");
+              perr(" token...\r\n");
             }
           }
         }
-        if (GetDupToken("trustedinstaller.exe", &hToken, &hNewToken, (verbosity == 1 ? 3 : verbosity))) {
-          bSuccess = IsTIToken(hNewToken, verbosity);
-          if (!bSuccess && verbosity > 0) perr("[!] Not a TrustedInstaller token\r\n");
+        if (!bSuccess && access == 2) {
+          CloseHandle(hNewToken); hNewToken = NULL;
+          CloseHandle(hToken); hToken = NULL;
+          if (!GetPIDForProcess("trustedinstaller.exe")) {
+            if (DoStartSvc(verbosity)) {
+              for (i = 0; i < 500; i++) {
+                if (GetPIDForProcess("trustedinstaller.exe")) break;
+                Sleep(10);
+              }
+            }
+          }
+          if (GetDupToken("trustedinstaller.exe", &hToken, &hNewToken, (verbosity == 1 ? 3 : verbosity))) {
+            bSuccess = IsTIToken(hNewToken, verbosity);
+            if (!bSuccess && verbosity == 2) perr("[!] Not a TrustedInstaller token\r\n");
+          }
+          CloseHandle(hNewToken); hNewToken = NULL;
         }
-      } else if (verbosity > 0) {
-        dwErr = GetLastError();
-        fmt_error("[!] advapi32:ImpersonateLoggedOnUser() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
-        perr("[!] Could not impersonate SYSTEM user\r\n");
       }
-      CloseHandle(hNewToken);
-
-      if (!bSuccess) {
+      if (!bSuccess && access == 2) {
         if (verbosity > 0) perr("[!] Failed to acquire TrustedInstaller privileges. Exiting...\r\n");
         if (cmdline) LocalFree(cmdline);
         if (pipe) {
@@ -1134,7 +1391,7 @@ int main(void) {
       }
     }
 
-    if(!DuplicateTokenEx(hToken, MAXIMUM_ALLOWED, NULL, seImpersonateLevel, tokenPrimary, &hNewToken)) {
+    if(!DuplicateTokenEx(hToken, MAXIMUM_ALLOWED, NULL, SecurityImpersonation, TokenPrimary, &hNewToken)) {
       if (verbosity > 0) {
         dwErr = GetLastError();
         fmt_error("[!] advapi32:DuplicateTokenEx() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
@@ -1148,7 +1405,7 @@ int main(void) {
         CloseHandle(hStdIn);
         hStdIn = INVALID_HANDLE_VALUE;
       }
-      CloseHandle(hToken);
+      CloseHandle(hToken); hToken = NULL;
       ExitProcess(-1);
     }
     if (verbosity == 2) perr("[+] Access token duplicated\r\n");
@@ -1161,7 +1418,7 @@ int main(void) {
           dwErr = GetLastError();
           fmt_error("[!] advapi32:OpenProcessToken() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
         }
-        hNewToken = 0;
+        hNewToken = NULL;
       }
     }
     if (!hNewToken || !EnableAllPriv(hNewToken, verbosity)) {
@@ -1170,8 +1427,7 @@ int main(void) {
       perr("[+] All privileges enabled\r\n");
     }
     if (access == 0 && hNewToken) {
-      CloseHandle(hNewToken);
-      hNewToken = 0;
+      CloseHandle(hNewToken); hNewToken = NULL;
     }
   }
 
