@@ -15,7 +15,7 @@ workspace "winsudo"
   omitframepointer "On"
   flags { "NoBufferSecurityCheck", "NoIncrementalLink", "NoManifest", "NoPCH", "NoRuntimeChecks", "OmitDefaultLibrary" }
   buildoptions { "/kernel", "/Gs1000000" }
-  linkoptions { "/kernel", "/SAFESEH:NO", "/GUARD:NO", "/EMITPOGOPHASEINFO", "/RELEASE", "/DEBUG:NONE", "/DYNAMICBASE:NO", "/FIXED" }
+  linkoptions { "/kernel", "/SAFESEH:NO", "/GUARD:NO", "/EMITPOGOPHASEINFO", "/RELEASE", "/DEBUG:NONE", "/DYNAMICBASE:NO", "/FIXED", "/NOIMPLIB", "/NOEXP" }
 
   filter "configurations:Release"
     runtime "Release"
@@ -33,10 +33,13 @@ project "ntdll_lib_stub"
   kind "SharedLib"
   language "C"
   targetname "ntdll"
-  targetextension ".dll"
   targetdir "build/obj"
   files { "src/ntdll_lib_stub.c", "src/ntdll.def" }
   entrypoint "DllMain"
+  filter "platforms:Win32"
+    targetextension ".x86"
+  filter "platforms:x64"
+    targetextension ".x64"
 
 project "winsudo"
   kind "ConsoleApp"
