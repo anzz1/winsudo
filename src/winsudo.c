@@ -320,6 +320,15 @@ __forceinline static void fmt_error(const char *fmt, DWORD_PTR arg1, DWORD_PTR a
   }
 }
 
+__forceinline static HLOCAL MemAlloc(UINT uFlags, SIZE_T uBytes) {
+  HLOCAL mem = LocalAlloc(uFlags, uBytes);
+  if (!mem) {
+    _perr("out of memory\r\n");
+    ExitProcess(-3);
+  }
+  return mem;
+}
+
 __forceinline static BOOL ReadEnvironmentVariable(const wchar_t* pszName, wchar_t* pszBuffer, DWORD cchBuffer) {
   DWORD cchCopied = GetEnvironmentVariableW(pszName, pszBuffer, cchBuffer);
   return(cchCopied && cchCopied < cchBuffer);
@@ -529,7 +538,7 @@ static LPVOID GetInfoFromToken(HANDLE hToken, TOKEN_INFORMATION_CLASS type, int 
       return NULL;
     }
   }
-  lpData = (LPVOID)LocalAlloc(LPTR, dwLength);
+  lpData = (LPVOID)MemAlloc(LPTR, dwLength);
   if (!GetTokenInformation(hToken, type, lpData, dwLength, &dwLength)) {
     dwErr = GetLastError();
     if (verbosity > 0) fmt_error("[!] advapi32:GetTokenInformation() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
@@ -540,7 +549,7 @@ static LPVOID GetInfoFromToken(HANDLE hToken, TOKEN_INFORMATION_CLASS type, int 
 }
 
 static HANDLE CreateUserToken(HANDLE base_token, int verbosity) {
-  HANDLE user_token;
+  HANDLE user_token = NULL;
   LUID luid;
   LARGE_INTEGER li;
   TOKEN_USER user;
@@ -572,7 +581,7 @@ static HANDLE CreateUserToken(HANDLE base_token, int verbosity) {
       if(primary_group) {
         default_dacl = (PTOKEN_DEFAULT_DACL)GetInfoFromToken(base_token, TokenDefaultDacl, verbosity);
         if (default_dacl) {
-          BYTE* grpCopy = LocalAlloc(LPTR, groups->GroupCount);
+          BYTE* grpCopy = MemAlloc(LPTR, groups->GroupCount);
 
           DWORD grpCount = tkg_good.GroupCount + tkg_xtra.GroupCount;
           for (i = 0, y = 0; i < tkg_xtra.GroupCount; i++) {
@@ -593,7 +602,7 @@ static HANDLE CreateUserToken(HANDLE base_token, int verbosity) {
               }
             }
           }
-          groups2 = (PTOKEN_GROUPS)LocalAlloc(LPTR, 4 + sizeof(SID_AND_ATTRIBUTES) * grpCount);
+          groups2 = (PTOKEN_GROUPS)MemAlloc(LPTR, 4 + sizeof(SID_AND_ATTRIBUTES) * grpCount);
           __movsb((unsigned char*)groups2, (unsigned const char*)&tkg_good, sizeof(tkg_good));
           groups2->GroupCount = grpCount;
           for (i = 0, x = tkg_good.GroupCount; i < tkg_xtra.GroupCount; i++) {
@@ -740,8 +749,6 @@ __forceinline static BOOL DoStartSvc(int verbosity) {
 
 static DWORD RunAs(wchar_t* buf, DWORD pid, int verbosity) {
   SHELLEXECUTEINFOW ShExecInfo;
-  HANDLE out_read = 0;
-  HANDLE in_write = 0;
   DWORD dwErr;
   DWORD exit_code = 0;
   wchar_t abc[64];
@@ -791,10 +798,11 @@ static DWORD RunAs(wchar_t* buf, DWORD pid, int verbosity) {
   }
   WaitForSingleObject(ShExecInfo.hProcess, INFINITE);
   GetExitCodeProcess(ShExecInfo.hProcess, &exit_code);
+  CloseHandle(ShExecInfo.hProcess);
   return exit_code;
 }
 
-__forceinline static DWORD OSMajorVersion() {
+__forceinline static DWORD OSMajorVersion(void) {
   OSVERSIONINFOW info;
   __stosb((PBYTE)&info, 0, sizeof(OSVERSIONINFOW));
   info.dwOSVersionInfoSize = sizeof(OSVERSIONINFOW);
@@ -1124,10 +1132,10 @@ int main(void) {
   if (!ppid) {
     if (s && *s) {
       if (nochange) {
-       cmdline = (wchar_t*)LocalAlloc(LMEM_FIXED, (wcslen(s)+16)*sizeof(wchar_t));
+       cmdline = (wchar_t*)MemAlloc(LMEM_FIXED, (wcslen(s)+16)*sizeof(wchar_t));
        wcscpy(cmdline, L"/d/x/s/v:off/r ");
       } else {
-        cmdline = (wchar_t*)LocalAlloc(LMEM_FIXED, (wcslen(s)+dirlen+27)*sizeof(wchar_t));
+        cmdline = (wchar_t*)MemAlloc(LMEM_FIXED, (wcslen(s)+dirlen+27)*sizeof(wchar_t));
         wcscpy(cmdline, L"/d/x/s/v:off/r pushd \"");
         GetCurrentDirectoryW(dirlen, cmdline+22);
         wcscat(cmdline, L"\" & ");
@@ -1140,7 +1148,7 @@ int main(void) {
       }
     } else {
       if (!nochange) {
-        cmdline = (wchar_t*)LocalAlloc(LMEM_FIXED, (wcslen(s)+dirlen+24)*sizeof(wchar_t));
+        cmdline = (wchar_t*)MemAlloc(LMEM_FIXED, (wcslen(s)+dirlen+24)*sizeof(wchar_t));
         wcscpy(cmdline, L"/d/x/s/v:off/k pushd \"");
         GetCurrentDirectoryW(dirlen, cmdline+22);
         wcscat(cmdline, L"\"");
