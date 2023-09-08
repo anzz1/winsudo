@@ -1,4 +1,5 @@
 LIBRARY "ntdll.dll"
 EXPORTS
+NtSetInformationProcess
 RtlGetVersion
 ZwCreateToken

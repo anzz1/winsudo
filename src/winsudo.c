@@ -34,8 +34,19 @@ typedef struct _OBJECT_ATTRIBUTES {
   PVOID           SecurityQualityOfService;
 } OBJECT_ATTRIBUTES, * POBJECT_ATTRIBUTES;
 
-extern __declspec(dllimport) long __stdcall RtlGetVersion(PRTL_OSVERSIONINFOW lpVersionInformation);
+typedef struct _PROCESS_ACCESS_TOKEN
+{
+  HANDLE Token;
+  HANDLE Thread;
+} PROCESS_ACCESS_TOKEN, * PPROCESS_ACCESS_TOKEN;
 
+extern __declspec(dllimport) long __stdcall NtSetInformationProcess(
+  HANDLE               ProcessHandle,
+  ULONG                ProcessInformationClass,
+  PVOID                ProcessInformation,
+  ULONG                ProcessInformationLength
+);
+extern __declspec(dllimport) long __stdcall RtlGetVersion(PRTL_OSVERSIONINFOW lpVersionInformation);
 extern __declspec(dllimport) long __stdcall ZwCreateToken(
   PHANDLE              TokenHandle,
   ACCESS_MASK          DesiredAccess,
@@ -52,8 +63,18 @@ extern __declspec(dllimport) long __stdcall ZwCreateToken(
   PTOKEN_SOURCE        TokenSource
 );
 
-static HANDLE g_hStdOut = 0;
-static HANDLE g_hStdErr = 0;
+static DWORD ppid = 0;
+static DWORD cpid = 0;
+
+static union {
+  struct {
+    BYTE nopriv:1;
+    BYTE notoken:1;
+    BYTE access:2;
+    BYTE verbosity:2;
+  } f;
+  DWORD u;
+} flags;
 
 static const char* sysProcs[] = {
   "lsass.exe",
@@ -102,6 +123,11 @@ VAR_TKP(2)
   tkp_impersonate = {2, {
     {{20, 0}, 2}, // SeDebugPrivilege
     {{29, 0}, 2}  // SeImpersonatePrivilege
+  }};
+
+VAR_TKP(1)
+  tkp_assign = {1, {
+    {{3, 0}, 2}   // SeAssignPrimaryTokenPrivilege
   }};
 
 VAR_TKP(35)
@@ -221,47 +247,77 @@ __forceinline static wchar_t* __ultow(unsigned long value, wchar_t* string) {
   return string;
 }
 
-__forceinline static char* __ultoa(unsigned long value, char* string) {
-  char buf[11];
-  char* pos;
-  if (!string) return 0;
-  pos = buf + 10;
-  *pos = 0;
-  do {
-    *--pos = 48 + (value % 10);
-  } while (value /= 10);
-  __movsb((unsigned char*)string, (unsigned const char*)pos, (buf - pos + 11) * sizeof(char));
-  return string;
-}
-
 __forceinline static void _ioprint(HANDLE std_handle, const char* cbuf) {
   DWORD u = 0;
   WriteFile(std_handle, cbuf, (DWORD)strlen(cbuf), &u, 0);
 }
 
+__declspec(dllexport) void __stdcall _print(const char* cbuf) {
+  _ioprint(GetStdHandle(STD_OUTPUT_HANDLE), cbuf);
+}
+
+__declspec(dllexport) void __stdcall _perr(const char* cbuf) {
+  _ioprint(GetStdHandle(STD_ERROR_HANDLE), cbuf);
+}
+
+DWORD __stdcall PrintThread(void* param) {
+  void* pfn = GetProcAddress(GetModuleHandleA(0), "_print");
+  if (pfn) ((void (__stdcall *)(const char*)) (void*)(pfn))(param);
+  return 0;
+}
+
+DWORD __stdcall ErrThread(void* param) {
+  void* pfn = GetProcAddress(GetModuleHandleA(0), "_perr");
+  if (pfn) ((void (__stdcall *)(const char*)) (void*)(pfn))(param);
+  return 0;
+}
+
+static void ThreadPrint(const char* cbuf, BOOL err) {
+  HANDLE hProc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, ppid);
+  if (hProc) {
+    SIZE_T clen = strlen(cbuf)+1;
+    void* page = VirtualAllocEx(hProc, NULL, clen, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE);
+    if (page) {
+      if (WriteProcessMemory(hProc, page, cbuf, clen, NULL)) {
+        HANDLE hThread = CreateRemoteThread(hProc, NULL, 0, (LPTHREAD_START_ROUTINE)(err ? ErrThread : PrintThread), page, 0, NULL);
+        if (hThread) {
+          WaitForSingleObject(hThread, INFINITE);
+          CloseHandle(hThread);
+        }
+      }
+      VirtualFreeEx(hProc, page, 0, MEM_RELEASE);
+      page = NULL;
+    }
+    CloseHandle(hProc);
+  }
+}
+
 __forceinline static void print(const char* cbuf) {
-  _ioprint(g_hStdOut, cbuf);
+  if (ppid) ThreadPrint(cbuf, 0);
+  else _print(cbuf);
 }
 
 __forceinline static void perr(const char* cbuf) {
-  _ioprint(g_hStdErr, cbuf);
+  if (ppid) ThreadPrint(cbuf, 1);
+  else _perr(cbuf);
 }
 
-__forceinline static void _fmt_ioprint(HANDLE std_handle, const char *fmt, DWORD_PTR arg1, DWORD_PTR arg2) {
+__forceinline static void fmt_print(const char *fmt, DWORD_PTR arg1, DWORD_PTR arg2) {
   char* fmt_str = 0;
   DWORD_PTR pArgs[] = { (DWORD_PTR)arg1, (DWORD_PTR)arg2 };
   if (FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_STRING | FORMAT_MESSAGE_ARGUMENT_ARRAY, fmt, 0, 0, (LPSTR)&fmt_str, 0, (va_list*)pArgs)) {
-    _ioprint(std_handle, fmt_str);
+    print(fmt_str);
     LocalFree(fmt_str);
   }
 }
 
-__forceinline static void fmt_print(const char *fmt, DWORD_PTR arg1, DWORD_PTR arg2) {
-  _fmt_ioprint(g_hStdOut, fmt, arg1, arg2);
-}
-
 __forceinline static void fmt_error(const char *fmt, DWORD_PTR arg1, DWORD_PTR arg2) {
-  _fmt_ioprint(g_hStdErr, fmt, arg1, arg2);
+  char* fmt_str = 0;
+  DWORD_PTR pArgs[] = { (DWORD_PTR)arg1, (DWORD_PTR)arg2 };
+  if (FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_STRING | FORMAT_MESSAGE_ARGUMENT_ARRAY, fmt, 0, 0, (LPSTR)&fmt_str, 0, (va_list*)pArgs)) {
+    perr(fmt_str);
+    LocalFree(fmt_str);
+  }
 }
 
 __forceinline static BOOL ReadEnvironmentVariable(const wchar_t* pszName, wchar_t* pszBuffer, DWORD cchBuffer) {
@@ -682,130 +738,46 @@ __forceinline static BOOL DoStartSvc(int verbosity) {
   return (ssStatus.dwCurrentState == SERVICE_RUNNING || ssStatus.dwCurrentState == SERVICE_START_PENDING);
 }
 
-static void MarioLoop(char* buf, HANDLE hProc, HANDLE r_out, HANDLE r_err, HANDLE r_in, HANDLE w_out, HANDLE w_err, HANDLE w_in) {
-  DWORD u = 0;
-  DWORD dwAvail = 0;
-  DWORD dwAvailErr = 0;
-  DWORD dwRead = 0;
-  __stosb(buf, 0, 4096);
-  while (1) {
-    if (!PeekNamedPipe(r_out, NULL, 0, NULL, &dwAvail, NULL))
-      break;
-    if (dwAvail > 0) {
-      if (!ReadFile(r_out, buf, 4096, &dwRead, 0) || dwRead == 0)
-        break;
-      WriteFile(w_out, buf, dwRead, &u, 0);
-    }
-    if (!PeekNamedPipe(r_err, NULL, 0, NULL, &dwAvailErr, NULL))
-      break;
-    if (dwAvailErr > 0) {
-      if (!ReadFile(r_err, buf, 4096, &dwRead, 0) || dwRead == 0)
-        break;
-      WriteFile(w_err, buf, dwRead, &u, 0);
-    }
-    if (!dwAvail && !dwAvailErr && WaitForSingleObject(hProc, 0) != WAIT_TIMEOUT)
-      break;
-    while (PeekNamedPipe(r_in, NULL, 0, NULL, &dwAvail, NULL)) {
-      if (!dwAvail || !ReadFile(r_in, buf, 4096, &dwRead, 0) || dwRead == 0)
-        break;
-      WriteFile(w_in, buf, dwRead, &u, 0);
-    }
-    while (WaitForSingleObject(r_in, 0) == WAIT_OBJECT_0 && GetConsoleMode(r_in, &u)) {
-      INPUT_RECORD r[512];
-      if (ReadConsoleInputA(r_in, r, 512, &dwRead) && dwRead > 0) {
-        for (DWORD i = 0; i < dwRead; i++) {
-          if (r[i].EventType == KEY_EVENT && r[i].Event.KeyEvent.bKeyDown) {
-            WriteFile(w_in, &r[i].Event.KeyEvent.uChar.AsciiChar, 1, &u, 0);
-          }
-        }
-      }
-    }
-    Sleep(1);
-  }
-}
-
-__forceinline static HANDLE OutReadPipe(DWORD pipe) {
-  SECURITY_ATTRIBUTES sa;
-  char buf[26] = "\\\\.\\pipe\\sudoo";
-  __ultoa(pipe, buf+14);
-  __stosb((PBYTE)&sa, 0, sizeof(SECURITY_ATTRIBUTES));
-  sa.nLength = sizeof(SECURITY_ATTRIBUTES);
-  sa.bInheritHandle = 1;
-  return CreateNamedPipeA(buf, PIPE_ACCESS_INBOUND, PIPE_TYPE_MESSAGE|PIPE_READMODE_MESSAGE|PIPE_WAIT, 1, 4096, 4096, 0, &sa);
-}
-
-__forceinline static HANDLE InWritePipe(DWORD pipe) {
-  SECURITY_ATTRIBUTES sa;
-  char buf[26] = "\\\\.\\pipe\\sudoi";
-  __ultoa(pipe, buf+14);
-  __stosb((PBYTE)&sa, 0, sizeof(SECURITY_ATTRIBUTES));
-  sa.nLength = sizeof(SECURITY_ATTRIBUTES);
-  sa.bInheritHandle = 1;
-  return CreateNamedPipeA(buf, PIPE_ACCESS_OUTBOUND, PIPE_TYPE_MESSAGE|PIPE_READMODE_MESSAGE|PIPE_WAIT, 1, 4096, 4096, 0, &sa);
-}
-
-static void RunAs(char* buf, wchar_t* cmdline, BOOL pipe, BOOL wait, int verbosity) {
+static DWORD RunAs(wchar_t* buf, DWORD pid, int verbosity) {
   SHELLEXECUTEINFOW ShExecInfo;
   HANDLE out_read = 0;
   HANDLE in_write = 0;
   DWORD dwErr;
   DWORD exit_code = 0;
-  wchar_t abc[4096];
+  wchar_t abc[64];
+  DWORD ppid;
 
-  dwErr = GetModuleFileNameW(0, (wchar_t*)buf, 2048);
+  dwErr = GetModuleFileNameW(0, buf, 2048);
   if (!dwErr || dwErr == 2048) {
     if (verbosity > 0) {
       dwErr = GetLastError();
       fmt_error("[!] kernel32:GetModuleFileNameW() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
       perr("[!] Could not create elevated process. Exiting...\r\n");
     }
-    ExitProcess(-1);
+    return -1;
   }
 
-  if (pipe) {
-    DWORD pid = GetCurrentProcessId();
-    wchar_t* s = abc;
-    *s++ = L'@';
-    *s++ = L'!';
-    *s++ = L'@';
-    *s++ = L'|';
-    __ultow(pid, s);
-    while (*s >= L'0' && *s <= L'9') s++;
-    if (cmdline) {
-      *s++ = L' ';
-      wcscpy(s, cmdline);
-    } else {
-      *s = 0;
-    }
-    out_read = OutReadPipe(pid);
-    if (!out_read || out_read == INVALID_HANDLE_VALUE) {
-      if (verbosity > 0) {
-        dwErr = GetLastError();
-        fmt_error("[!] kernel32:CreateNamedPipeA() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
-        perr("[!] Could not create elevated process. Exiting...\r\n");
-      }
-      ExitProcess(-1);
-    }
-    in_write = InWritePipe(pid);
-    if (!in_write || in_write == INVALID_HANDLE_VALUE) {
-      if (verbosity > 0) {
-        dwErr = GetLastError();
-        fmt_error("[!] kernel32:CreateNamedPipeA() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
-        perr("[!] Could not create elevated process. Exiting...\r\n");
-      }
-      CloseHandle(out_read);
-      out_read = INVALID_HANDLE_VALUE;
-      ExitProcess(-1);
-    }
-  }
+  ppid = GetCurrentProcessId();
+  wchar_t* s = abc;
+  *s++ = L'@';
+  *s++ = L'!';
+  *s++ = L'@';
+  *s++ = L'|';
+  __ultow(ppid, s);
+  while (*s >= L'0' && *s <= L'9') s++;
+  *s++ = L'|';
+  __ultow(pid, s);
+  while (*s >= L'0' && *s <= L'9') s++;
+  *s++ = L'|';
+  __ultow(flags.u, s);
 
   __stosb((PBYTE)&ShExecInfo, 0, sizeof(SHELLEXECUTEINFOW));
   ShExecInfo.cbSize = sizeof(SHELLEXECUTEINFOW);
   ShExecInfo.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_UNICODE | SEE_MASK_NO_CONSOLE | SEE_MASK_NOASYNC;
   ShExecInfo.hwnd = NULL;
   ShExecInfo.lpVerb = L"runas";
-  ShExecInfo.lpFile = (wchar_t*)buf;
-  ShExecInfo.lpParameters = pipe ? abc : cmdline;
+  ShExecInfo.lpFile = buf;
+  ShExecInfo.lpParameters = abc;
   ShExecInfo.lpDirectory = NULL;
   ShExecInfo.nShow = SW_HIDE;
   ShExecInfo.hInstApp = NULL;
@@ -815,52 +787,11 @@ static void RunAs(char* buf, wchar_t* cmdline, BOOL pipe, BOOL wait, int verbosi
       fmt_error("[!] shell32:ShellExecuteExW() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
       perr("[!] Could not create elevated process. Exiting...\r\n");
     }
-    if (pipe) {
-      CloseHandle(out_read);
-      out_read = INVALID_HANDLE_VALUE;
-      CloseHandle(in_write);
-      in_write = INVALID_HANDLE_VALUE;
-    }
-    ExitProcess(-1);
+    return -1;
   }
-  if (pipe) {
-    if (WaitForSingleObject(ShExecInfo.hProcess,0) == WAIT_TIMEOUT && (ConnectNamedPipe(out_read, 0) || GetLastError() == ERROR_PIPE_CONNECTED)) {
-      HANDLE hStdIn = GetStdHandle(STD_INPUT_HANDLE);
-      HANDLE hStdOut = GetStdHandle(STD_OUTPUT_HANDLE);
-      MarioLoop(buf, ShExecInfo.hProcess, out_read, out_read, hStdIn, hStdOut, hStdOut, in_write);
-    } else if (verbosity > 0) {
-      perr("[!] Could not connect pipe to elevated process\r\n");
-    }
-    CloseHandle(out_read);
-    out_read = INVALID_HANDLE_VALUE;
-    CloseHandle(in_write);
-    in_write = INVALID_HANDLE_VALUE;
-  }
-  if (wait) {
-    WaitForSingleObject(ShExecInfo.hProcess, INFINITE);
-    GetExitCodeProcess(ShExecInfo.hProcess, &exit_code);
-  }
-  ExitProcess(exit_code);
-}
-
-__forceinline static HANDLE GetStdOutPipe(DWORD pipe) {
-  SECURITY_ATTRIBUTES sa;
-  char buf[26] = "\\\\.\\pipe\\sudoo";
-  __ultoa(pipe, buf+14);
-  __stosb((PBYTE)&sa, 0, sizeof(SECURITY_ATTRIBUTES));
-  sa.nLength= sizeof(SECURITY_ATTRIBUTES);
-  sa.bInheritHandle = 1;
-  return CreateFileA(buf, FILE_WRITE_DATA|SYNCHRONIZE, 0, &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
-}
-
-__forceinline static HANDLE GetStdInPipe(DWORD pipe) {
-  SECURITY_ATTRIBUTES sa;
-  char buf[26] = "\\\\.\\pipe\\sudoi";
-  __ultoa(pipe, buf+14);
-  __stosb((PBYTE)&sa, 0, sizeof(SECURITY_ATTRIBUTES));
-  sa.nLength= sizeof(SECURITY_ATTRIBUTES);
-  sa.bInheritHandle = 1;
-  return CreateFileA(buf, FILE_READ_DATA|SYNCHRONIZE, 0, &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+  WaitForSingleObject(ShExecInfo.hProcess, INFINITE);
+  GetExitCodeProcess(ShExecInfo.hProcess, &exit_code);
+  return exit_code;
 }
 
 __forceinline static DWORD OSMajorVersion() {
@@ -887,50 +818,33 @@ __forceinline static BOOL Is64BitOS(void) {
 int main(void) {
   HANDLE hToken = NULL;
   HANDLE hNewToken = NULL;
-  HANDLE hProc = NULL;
-  HANDLE hStdIn = NULL;
-  HANDLE hStdOut = NULL;
-  HANDLE hStdErr = NULL;
   STARTUPINFOW si;
   PROCESS_INFORMATION pi;
+  PROCESS_ACCESS_TOKEN tokenInfo;
   DWORD dwErr;
   wchar_t *cmdline = NULL;
   wchar_t *s = NULL;
   DWORD exit_code = 0;
-  BOOL wait = FALSE;
-  BOOL change = TRUE;
-  BOOL hide = FALSE;
   int verbosity = -1;
   BOOL new = FALSE;
-  BOOL allpriv = TRUE;
-  BOOL useenv = TRUE;
   BOOL do_test = FALSE;
-  BOOL notoken = FALSE;
-  DWORD access = 1;
+  BOOL wait = FALSE;
+  BOOL nochange = FALSE;
+  BOOL hide = FALSE;
   DWORD dirlen = 0;
   int w = 0, h = 0, cols = 0, rows = 0;
-  HANDLE out_read = NULL;
-  HANDLE out_write = NULL;
-  HANDLE err_read = NULL;
-  HANDLE err_write = NULL;
-  HANDLE in_read = NULL;
-  HANDLE in_write = NULL;
-  char buf[4096];
-  DWORD dwRead = 0;
-  DWORD dwAvail = 0;
-  DWORD dwAvailErr = 0;
-  DWORD dwFlags = 0;
+  wchar_t buf[2048];
+  DWORD dwFlags = CREATE_SUSPENDED;
+  BOOL runas = FALSE;
   BOOL bSuccess = FALSE;
   DWORD i;
-  LPVOID lpEnvironment = NULL;
-  DWORD pipe = 0;
 
   __stosb((PBYTE)&si, 0, sizeof(STARTUPINFOW));
   __stosb((PBYTE)&pi, 0, sizeof(PROCESS_INFORMATION));
   si.cb = sizeof(STARTUPINFOW);
-
-  g_hStdOut = GetStdHandle(STD_OUTPUT_HANDLE);
-  g_hStdErr = GetStdHandle(STD_ERROR_HANDLE);
+  tokenInfo.Token = 0;
+  tokenInfo.Thread = 0;
+  flags.f.access = 1;
 
 #ifndef _WIN64
   if (Is64BitOS()) {
@@ -945,7 +859,7 @@ int main(void) {
 
   dirlen = GetCurrentDirectoryW(0,0);
   if (!dirlen) {
-    change = FALSE;
+    nochange = TRUE;
   }
 
   s = GetCommandLineW();
@@ -964,11 +878,15 @@ int main(void) {
 
     if (*s == L'@' && *(s+1) == L'!' && *(s+2) == L'@' && *(s+3) == L'|') {
       s += 4;
-      pipe = __wtoul(s);
+      ppid = __wtoul(s);
       while (*s >= L'0' && *s <= L'9') s++;
-      while (*s == L' ' || *s == L'\t') s++;
+      if (*s++ != L'|') ExitProcess(-1);
+      cpid = __wtoul(s);
+      while (*s >= L'0' && *s <= L'9') s++;
+      if (*s++ != L'|') ExitProcess(-1);
+      flags.u = __wtoul(s);
+      verbosity = flags.f.verbosity;
     }
-    cmdline = s;
 
     while (*s == L'-' || *s == L'/') {
       wchar_t* s2 = s;
@@ -1000,13 +918,12 @@ int main(void) {
               "  -w, --wait                wait for process to exit\r\n"
               "  -z, --hide                hide process window\r\n"
               "  -d, --nocd                do not change directory\r\n"
-              "  -e, --noenv               do not pass environment\r\n"
               "  -k, --notoken             do not use all-access token\r\n"
               "  -p, --nopriv              do not enable all privileges\r\n"
               "  -s, --silent              silent output\r\n"
               "  -v, --verbose             verbose output\r\n"
               "      --test                test privileges\r\n\r\n"
-              "With no -a or -t, run as SYSTEM user\r\n");
+              "By default, run as SYSTEM user\r\n");
         ExitProcess(0);
       } else if ((*s == L'T' || *s == L't') &&
         (*(s+1) == L'E' || *(s+1) == L'e') &&
@@ -1053,29 +970,17 @@ int main(void) {
         (*(s+4) == L'\0' || *(s+4) == L' ' || *(s+4) == L'\t' || *(s+4) == L'/' || *(s+4) == L'-')) {
         s += 4;
         wait = TRUE;
-      } else if ((*s == L'E' || *s == L'e') &&
-        (*(s+1) == L'\0' || *(s+1) == L' ' || *(s+1) == L'\t' || *(s+1) == L'/' || *(s+1) == L'-')) {
-        s++;
-        useenv = FALSE;
-      } else if ((*s == L'N' || *s == L'n') &&
-        (*(s+1) == L'O' || *(s+1) == L'o') &&
-        (*(s+2) == L'E' || *(s+2) == L'e') &&
-        (*(s+3) == L'N' || *(s+3) == L'n') &&
-        (*(s+4) == L'V' || *(s+4) == L'v') &&
-        (*(s+5) == L'\0' || *(s+5) == L' ' || *(s+5) == L'\t' || *(s+5) == L'/' || *(s+5) == L'-')) {
-        s += 5;
-        useenv = FALSE;
       } else if ((*s == L'D' || *s == L'd') &&
         (*(s+1) == L'\0' || *(s+1) == L' ' || *(s+1) == L'\t' || *(s+1) == L'/' || *(s+1) == L'-')) {
         s++;
-        change = FALSE;
+        nochange = TRUE;
       } else if ((*s == L'N' || *s == L'n') &&
         (*(s+1) == L'O' || *(s+1) == L'o') &&
         (*(s+2) == L'C' || *(s+2) == L'c') &&
         (*(s+3) == L'D' || *(s+3) == L'd') &&
         (*(s+4) == L'\0' || *(s+4) == L' ' || *(s+4) == L'\t' || *(s+4) == L'/' || *(s+4) == L'-')) {
         s += 4;
-        change = FALSE;
+        nochange = TRUE;
       } else if ((*s == L'Z' || *s == L'z') &&
         (*(s+1) == L'\0' || *(s+1) == L' ' || *(s+1) == L'\t' || *(s+1) == L'/' || *(s+1) == L'-')) {
         s++;
@@ -1100,12 +1005,12 @@ int main(void) {
       } else if ((*s == L'T' || *s == L't') &&
         (*(s+1) == L'\0' || *(s+1) == L' ' || *(s+1) == L'\t' || *(s+1) == L'/' || *(s+1) == L'-')) {
         s++;
-        access = 2;
+        flags.f.access = 2;
       } else if ((*s == L'T' || *s == L't') &&
         (*(s+1) == L'I' || *(s+1) == L'i') &&
         (*(s+2) == L'\0' || *(s+2) == L' ' || *(s+2) == L'\t' || *(s+2) == L'/' || *(s+2) == L'-')) {
         s += 2;
-        access = 2;
+        flags.f.access = 2;
       } else if ((*s == L'T' || *s == L't') &&
         (*(s+1) == L'R' || *(s+1) == L'r') &&
         (*(s+2) == L'U' || *(s+2) == L'u') &&
@@ -1124,11 +1029,11 @@ int main(void) {
         (*(s+15) == L'R' || *(s+15) == L'r') &&
         (*(s+16) == L'\0' || *(s+16) == L' ' || *(s+16) == L'\t' || *(s+16) == L'/' || *(s+16) == L'-')) {
         s += 16;
-        access = 2;
+        flags.f.access = 2;
       } else if ((*s == L'P' || *s == L'p') &&
         (*(s+1) == L'\0' || *(s+1) == L' ' || *(s+1) == L'\t' || *(s+1) == L'/' || *(s+1) == L'-')) {
         s++;
-        allpriv = FALSE;
+        flags.f.nopriv = TRUE;
       } else if ((*s == L'N' || *s == L'n') &&
         (*(s+1) == L'O' || *(s+1) == L'o') &&
         (*(s+2) == L'P' || *(s+2) == L'p') &&
@@ -1137,11 +1042,11 @@ int main(void) {
         (*(s+5) == L'V' || *(s+5) == L'v') &&
         (*(s+6) == L'\0' || *(s+6) == L' ' || *(s+6) == L'\t' || *(s+6) == L'/' || *(s+6) == L'-')) {
         s += 6;
-        allpriv = FALSE;
+        flags.f.nopriv = TRUE;
       } else if ((*s == L'A' || *s == L'a') &&
         (*(s+1) == L'\0' || *(s+1) == L' ' || *(s+1) == L'\t' || *(s+1) == L'/' || *(s+1) == L'-')) {
         s++;
-        access = 0;
+        flags.f.access = 0;
       } else if ((*s == L'A' || *s == L'a') &&
         (*(s+1) == L'D' || *(s+1) == L'd') &&
         (*(s+2) == L'M' || *(s+2) == L'm') &&
@@ -1149,7 +1054,7 @@ int main(void) {
         (*(s+4) == L'N' || *(s+4) == L'n') &&
         (*(s+5) == L'\0' || *(s+5) == L' ' || *(s+5) == L'\t' || *(s+5) == L'/' || *(s+5) == L'-')) {
         s += 5;
-        access = 0;
+        flags.f.access = 0;
       } else if ((*s == L'A' || *s == L'a') &&
         (*(s+1) == L'D' || *(s+1) == L'd') &&
         (*(s+2) == L'M' || *(s+2) == L'm') &&
@@ -1165,11 +1070,11 @@ int main(void) {
         (*(s+12) == L'R' || *(s+12) == L'r') &&
         (*(s+13) == L'\0' || *(s+13) == L' ' || *(s+13) == L'\t' || *(s+13) == L'/' || *(s+13) == L'-')) {
         s += 13;
-        access = 0;
+        flags.f.access = 0;
       } else if ((*s == L'K' || *s == L'k') &&
         (*(s+1) == L'\0' || *(s+1) == L' ' || *(s+1) == L'\t' || *(s+1) == L'/' || *(s+1) == L'-')) {
         s++;
-        notoken = TRUE;
+        flags.f.notoken = TRUE;
       } else if ((*s == L'N' || *s == L'n') &&
         (*(s+1) == L'O' || *(s+1) == L'o') &&
         (*(s+2) == L'T' || *(s+2) == L't') &&
@@ -1179,7 +1084,7 @@ int main(void) {
         (*(s+6) == L'N' || *(s+6) == L'n') &&
         (*(s+7) == L'\0' || *(s+7) == L' ' || *(s+7) == L'\t' || *(s+7) == L'/' || *(s+7) == L'-')) {
         s += 7;
-        notoken = TRUE;
+        flags.f.notoken = TRUE;
       } else if ((*s == L'S' || *s == L's') &&
         (*(s+1) == L'Y' || *(s+1) == L'y') &&
         (*(s+2) == L'S' || *(s+2) == L's') &&
@@ -1188,7 +1093,7 @@ int main(void) {
         (*(s+5) == L'M' || *(s+5) == L'm') &&
         (*(s+6) == L'\0' || *(s+6) == L' ' || *(s+5) == L'\t' || *(s+5) == L'/' || *(s+5) == L'-')) {
         s += 6;
-        access = 1;
+        flags.f.access = 1;
       } else {
         while (*s && *s != L' ' && *s != L'\t') ++s;
         fmt_error("unknown command line option: '%1!.*ws!'\r\n", (DWORD_PTR)(s-s2), (DWORD_PTR)s2);
@@ -1212,115 +1117,70 @@ int main(void) {
         print("Is TrustedInstaller ? ");
         print(isTI ? "YES\r\n" : "NO\r\n");
       }
-      ExitProcess(access > 0 ? (access == 1 ? !isSystem : !isTI) : !isAdmin);
+      ExitProcess(flags.f.access > 0 ? (flags.f.access == 1 ? !isSystem : !isTI) : !isAdmin);
     }
   }
 
-  if (s && *s) {
-    if (verbosity == -1) verbosity = 1;
-    if (!new) {
-      wait = TRUE;
-      hide = TRUE;
-    }
-  } else {
-    if (verbosity == -1) verbosity = 2;
-//  wait = FALSE;
-    hide = FALSE;
-    new = TRUE;
-  }
-
-  if (pipe) {
-    hStdOut = GetStdOutPipe(pipe);
-    if (!hStdOut || hStdOut == INVALID_HANDLE_VALUE) {
-      if (verbosity > 0) {
-        dwErr = GetLastError();
-        fmt_error("[!] kernel32:CreateFileA() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
-        perr("[!] Could not connect pipe to parent process. Exiting...\r\n");
+  if (!ppid) {
+    if (s && *s) {
+      if (nochange) {
+       cmdline = (wchar_t*)LocalAlloc(LMEM_FIXED, (wcslen(s)+16)*sizeof(wchar_t));
+       wcscpy(cmdline, L"/d/x/s/v:off/r ");
+      } else {
+        cmdline = (wchar_t*)LocalAlloc(LMEM_FIXED, (wcslen(s)+dirlen+27)*sizeof(wchar_t));
+        wcscpy(cmdline, L"/d/x/s/v:off/r pushd \"");
+        GetCurrentDirectoryW(dirlen, cmdline+22);
+        wcscat(cmdline, L"\" & ");
       }
-      ExitProcess(-1);
-    }
-    hStdIn = GetStdInPipe(pipe);
-    if (!hStdIn || hStdIn == INVALID_HANDLE_VALUE) {
-      if (verbosity > 0) {
-        dwErr = GetLastError();
-        fmt_error("[!] kernel32:CreateFileA() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
-        perr("[!] Could not connect pipe to parent process. Exiting...\r\n");
+      wcscat(cmdline, s);
+      if (verbosity == -1) verbosity = 1;
+      if (!new) {
+        wait = TRUE;
+        hide = FALSE;
       }
-      CloseHandle(hStdOut);
-      hStdOut = INVALID_HANDLE_VALUE;
-      ExitProcess(-1);
-    }
-    hStdErr = hStdOut;
-    g_hStdOut = hStdOut;
-    g_hStdErr = hStdErr;
-  } else if (verbosity == 2) {
-    perr("[+] Run As: ");
-    if (access == 2) {
-      perr("TrustedInstaller\r\n");
-    } else if (access == 1) {
-      perr("SYSTEM\r\n");
     } else {
-      perr("Administrator\r\n");
+      if (!nochange) {
+        cmdline = (wchar_t*)LocalAlloc(LMEM_FIXED, (wcslen(s)+dirlen+24)*sizeof(wchar_t));
+        wcscpy(cmdline, L"/d/x/s/v:off/k pushd \"");
+        GetCurrentDirectoryW(dirlen, cmdline+22);
+        wcscat(cmdline, L"\"");
+      }
+      if (verbosity == -1) verbosity = 2;
+      hide = FALSE;
+      new = TRUE;
+    }
+    flags.f.verbosity = verbosity;
+    if (verbosity == 2) {
+      perr("[+] Run As: ");
+      if (flags.f.access == 2) {
+        perr("TrustedInstaller\r\n");
+      } else if (flags.f.access == 1) {
+        perr("SYSTEM\r\n");
+      } else {
+        perr("Administrator\r\n");
+      }
     }
   }
 
-  if (!IsAdminToken(0, verbosity)) {
-    if (!pipe) {
+  if (!IsSystemToken(0, verbosity) && !IsAdminToken(0, verbosity)) {
+    if (!ppid) {
+      runas = TRUE;
       if (verbosity == 2) perr("[+] Requesting administrator privileges...\r\n");
-      RunAs(buf, cmdline, (!new || verbosity > 0), wait, verbosity);
     } else {
       if (verbosity > 0) perr("[!] Could not acquire administrator privileges. Exiting...\r\n");
-      CloseHandle(hStdOut);
-      hStdOut = INVALID_HANDLE_VALUE;
-      hStdErr = INVALID_HANDLE_VALUE;
-      CloseHandle(hStdIn);
-      hStdIn = INVALID_HANDLE_VALUE;
       ExitProcess(-1);
     }
-  } else if (pipe && verbosity == 2) {
+  } else if (ppid && verbosity == 2) {
     perr("[+] Administrator privileges acquired\r\n");
   }
 
-  if (s && *s) {
-    if (change) {
-      cmdline = (wchar_t*)LocalAlloc(LMEM_FIXED, (wcslen(s)+dirlen+27)*sizeof(wchar_t));
-      wcscpy(cmdline, L"/d/x/s/v:off/r pushd \"");
-      GetCurrentDirectoryW(dirlen, cmdline+22);
-      wcscat(cmdline, L"\" & ");
-    } else {
-      cmdline = (wchar_t*)LocalAlloc(LMEM_FIXED, (wcslen(s)+16)*sizeof(wchar_t));
-      wcscpy(cmdline, L"/d/x/s/v:off/r ");
-    }
-    wcscat(cmdline, s);
-  } else {
-    if (change) {
-      cmdline = (wchar_t*)LocalAlloc(LMEM_FIXED, (wcslen(s)+dirlen+24)*sizeof(wchar_t));
-      wcscpy(cmdline, L"/d/x/s/v:off/k pushd \"");
-      GetCurrentDirectoryW(dirlen, cmdline+22);
-      wcscat(cmdline, L"\"");
-    } else {
-      cmdline = 0;
-    }
-  }
-
-  if (access > 0) {
+  if (!runas && (flags.f.access > 0 || ppid)) {
     if (!EnableImpersonatePriv(verbosity)) {
       if (verbosity > 0) perr("[!] Could not acquire impersonation privileges. Exiting...\r\n");
       if (cmdline) LocalFree(cmdline);
-      if (pipe) {
-        CloseHandle(hStdOut);
-        hStdOut = INVALID_HANDLE_VALUE;
-        hStdErr = INVALID_HANDLE_VALUE;
-        CloseHandle(hStdIn);
-        hStdIn = INVALID_HANDLE_VALUE;
-      }
       ExitProcess(-1);
     }
     if (verbosity == 2) perr("[+] Impersonation privileges acquired\r\n");
-
-//  if (access == 2 && !GetPIDForProcess("trustedinstaller.exe")) {
-//    DoStartSvc(verbosity);
-//  }
 
     for (i = 0; i < countof(sysProcs); i++) {
       if (GetDupToken(sysProcs[i], &hToken, &hNewToken, verbosity)) {
@@ -1332,95 +1192,90 @@ int main(void) {
     }
 
     if (i == countof(sysProcs)) {
-      if (verbosity > 0) perr("[!] Failed to acquire SYSTEM privileges. Exiting...\r\n");
+      if (verbosity > 0) perr("[!] Failed to acquire SYSTEM token. Exiting...\r\n");
       if (cmdline) LocalFree(cmdline);
-      if (pipe) {
-        CloseHandle(hStdOut);
-        hStdOut = INVALID_HANDLE_VALUE;
-        hStdErr = INVALID_HANDLE_VALUE;
-        CloseHandle(hStdIn);
-        hStdIn = INVALID_HANDLE_VALUE;
-      }
       ExitProcess(-1);
     }
 
-    if (!notoken || access == 2) {
-      bSuccess = FALSE;
-      if (!ImpersonateLoggedOnUser(hNewToken)) {
+    bSuccess = FALSE;
+    if (!AdjustTokenPrivileges(hNewToken, FALSE, (TOKEN_PRIVILEGES*)&tkp_assign, 0, NULL, NULL)) {
+      dwErr = GetLastError();
+      fmt_error("[!] advapi32:AdjustTokenPrivileges() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
+      CloseHandle(hNewToken); hNewToken = NULL;
+      CloseHandle(hToken); hToken = NULL;
+    } else if (!ImpersonateLoggedOnUser(hNewToken)) {
+      dwErr = GetLastError();
+      fmt_error("[!] advapi32:ImpersonateLoggedOnUser() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
+      CloseHandle(hNewToken); hNewToken = NULL;
+      CloseHandle(hToken); hToken = NULL;
+    } else if (flags.f.access > 0) {
+      if (flags.f.access != 2) bSuccess = TRUE;
+      if (!flags.f.notoken) {
+        HANDLE hUserToken = CreateUserToken(hNewToken, verbosity);
+        if (hUserToken) {
+          bSuccess = TRUE;
+          if (verbosity == 2) perr("[+] All-access token created\r\n");
+          CloseHandle(hToken);
+          hToken = hUserToken;
+        } else if (verbosity > 0) {
+          perr("[!] Could not create all-access token\r\n");
+          if (verbosity == 2) {
+            perr("[+] Falling back to ");
+            perr((flags.f.access == 2) ? "TrustedInstaller" : "SYSTEM");
+            perr(" token...\r\n");
+          }
+        }
+      }
+      CloseHandle(hNewToken); hNewToken = NULL;
+      if (!bSuccess && flags.f.access == 2) {
+        CloseHandle(hToken); hToken = NULL;
+        if (!GetPIDForProcess("trustedinstaller.exe")) {
+          if (DoStartSvc(verbosity)) {
+            for (i = 0; i < 500; i++) {
+              if (GetPIDForProcess("trustedinstaller.exe")) break;
+              Sleep(10);
+            }
+          }
+        }
+        if (GetDupToken("trustedinstaller.exe", &hToken, &hNewToken, (verbosity == 1 ? 3 : verbosity))) {
+          bSuccess = IsTIToken(hNewToken, verbosity);
+          if (!bSuccess && verbosity == 2) perr("[!] Not a TrustedInstaller token\r\n");
+          CloseHandle(hNewToken); hNewToken = NULL;
+        }
+      }
+    } else {
+      CloseHandle(hNewToken); hNewToken = NULL;
+      CloseHandle(hToken);
+      bSuccess = OpenProcessToken((HANDLE)-1, TOKEN_DUPLICATE | TOKEN_IMPERSONATE, &hToken);
+      if (verbosity > 0 && !bSuccess) {
         dwErr = GetLastError();
-        fmt_error("[!] advapi32:ImpersonateLoggedOnUser() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
-      } else {
-        if (!notoken) {
-          HANDLE hUserToken = CreateUserToken(hNewToken, verbosity);
-          if (hUserToken) {
-            bSuccess = TRUE;
-            if (verbosity == 2) perr("[+] All-access token created\r\n");
-            CloseHandle(hNewToken); hNewToken = NULL;
-            CloseHandle(hToken);
-            hToken = hUserToken;
-          } else if (verbosity > 0) {
-            perr("[!] Could not create all-access token\r\n");
-            if (verbosity == 2) {
-              perr("[+] Falling back to ");
-              perr((access == 2) ? "TrustedInstaller" : "SYSTEM");
-              perr(" token...\r\n");
-            }
-          }
-        }
-        if (!bSuccess && access == 2) {
-          CloseHandle(hNewToken); hNewToken = NULL;
-          CloseHandle(hToken); hToken = NULL;
-          if (!GetPIDForProcess("trustedinstaller.exe")) {
-            if (DoStartSvc(verbosity)) {
-              for (i = 0; i < 500; i++) {
-                if (GetPIDForProcess("trustedinstaller.exe")) break;
-                Sleep(10);
-              }
-            }
-          }
-          if (GetDupToken("trustedinstaller.exe", &hToken, &hNewToken, (verbosity == 1 ? 3 : verbosity))) {
-            bSuccess = IsTIToken(hNewToken, verbosity);
-            if (!bSuccess && verbosity == 2) perr("[!] Not a TrustedInstaller token\r\n");
-          }
-          CloseHandle(hNewToken); hNewToken = NULL;
-        }
+        fmt_error("[!] advapi32:OpenProcessToken() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
       }
-      if (!bSuccess && access == 2) {
-        if (verbosity > 0) perr("[!] Failed to acquire TrustedInstaller privileges. Exiting...\r\n");
-        if (cmdline) LocalFree(cmdline);
-        if (pipe) {
-          CloseHandle(hStdOut);
-          hStdOut = INVALID_HANDLE_VALUE;
-          hStdErr = INVALID_HANDLE_VALUE;
-          CloseHandle(hStdIn);
-          hStdIn = INVALID_HANDLE_VALUE;
-        }
-        ExitProcess(-1);
-      }
+    }
+
+    if (!bSuccess) {
+      if (verbosity > 0) perr("[!] Failed to acquire elevation token. Exiting...\r\n");
+      if (cmdline) LocalFree(cmdline);
+      ExitProcess(-1);
     }
 
     if(!DuplicateTokenEx(hToken, MAXIMUM_ALLOWED, NULL, SecurityImpersonation, TokenPrimary, &hNewToken)) {
       if (verbosity > 0) {
         dwErr = GetLastError();
         fmt_error("[!] advapi32:DuplicateTokenEx() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
-        perr("[!] Could not duplicate access token. Exiting...\r\n");
+        perr("[!] Failed to duplicate access token. Exiting...\r\n");
       }
       if (cmdline) LocalFree(cmdline);
-      if (pipe) {
-        CloseHandle(hStdOut);
-        hStdOut = INVALID_HANDLE_VALUE;
-        hStdErr = INVALID_HANDLE_VALUE;
-        CloseHandle(hStdIn);
-        hStdIn = INVALID_HANDLE_VALUE;
-      }
       CloseHandle(hToken); hToken = NULL;
       ExitProcess(-1);
     }
     if (verbosity == 2) perr("[+] Access token duplicated\r\n");
+
+    tokenInfo.Token = hNewToken;
   }
 
-  if (allpriv) {
-    if (access == 0) {
+  if (!runas && !flags.f.nopriv) {
+    if (flags.f.access == 0 && !ppid) {
       if (!OpenProcessToken((HANDLE)-1, TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES, &hNewToken)) {
         if (verbosity > 0)  {
           dwErr = GetLastError();
@@ -1434,125 +1289,85 @@ int main(void) {
     } else if (verbosity == 2) {
       perr("[+] All privileges enabled\r\n");
     }
-    if (access == 0 && hNewToken) {
+    if (flags.f.access == 0 && hNewToken && !ppid) {
       CloseHandle(hNewToken); hNewToken = NULL;
     }
   }
 
-  if (verbosity == 2) perr("[+] Spawning ComSpec...\r\n");
-  if (hide) {
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
+  if (!runas && verbosity == 2) perr("[+] Spawning ComSpec...\r\n");
 
-    if (!new) {
-      SECURITY_ATTRIBUTES sa;
-      __stosb((PBYTE)&sa, 0, sizeof(SECURITY_ATTRIBUTES));
-      sa.nLength = sizeof(SECURITY_ATTRIBUTES);
-      sa.bInheritHandle = 1;
-
-      CreatePipe(&out_read, &out_write, &sa, 0);
-      CreatePipe(&err_read, &err_write, &sa, 0);
-      CreatePipe(&in_read, &in_write, &sa, 0);
-
-      SetHandleInformation(out_read, HANDLE_FLAG_INHERIT, 0);
-      SetHandleInformation(err_read, HANDLE_FLAG_INHERIT, 0);
-      SetHandleInformation(in_write, HANDLE_FLAG_INHERIT, 0);
-
-      si.dwFlags |= STARTF_USESTDHANDLES;
-      si.hStdError = err_write;
-      si.hStdOutput = out_write;
-      si.hStdInput = in_read;
+  if (ppid) {
+    HANDLE hProc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, cpid);
+    if (hProc) {
+      dwErr = NtSetInformationProcess(hProc, 9, &tokenInfo, sizeof(PROCESS_ACCESS_TOKEN));
+      CloseHandle(hProc);
+      if (dwErr) {
+        exit_code = -1;
+        if (verbosity > 0) fmt_error("[!] ntdll:NtSetInformationProcess() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
+      }
+    } else if (verbosity > 0)  {
+      exit_code = -1;
+      dwErr = GetLastError();
+      fmt_error("[!] kernel32:OpenProcess() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
     }
   } else {
-    si.dwFlags = STARTF_USECOUNTCHARS;
-    if (GetWindowSize(&w, &h) && GetConsoleBufferSize(&cols, &rows)) {
-      si.dwFlags |= STARTF_USESIZE;
-      si.dwXSize = w;
-      si.dwYSize = h;
-      si.dwXCountChars = cols;
-      si.dwYCountChars = rows;
+    if (hide) {
+      dwFlags |= CREATE_NO_WINDOW;
+      si.dwFlags = STARTF_USESHOWWINDOW;
+      si.wShowWindow = SW_HIDE;
     } else {
-      si.dwXCountChars = 80;
-      si.dwYCountChars = 300;
+      if (new) dwFlags |= CREATE_NEW_CONSOLE;
+      si.dwFlags = STARTF_USECOUNTCHARS;
+      if (GetWindowSize(&w, &h) && GetConsoleBufferSize(&cols, &rows)) {
+        si.dwFlags |= STARTF_USESIZE;
+        si.dwXSize = w;
+        si.dwYSize = h;
+        si.dwXCountChars = cols;
+        si.dwYCountChars = rows;
+     } else {
+        si.dwXCountChars = 80;
+        si.dwYCountChars = 300;
+      }
     }
-  }
-  dwFlags = new ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW;
-  if (useenv) {
-    if (CreateEnvironmentBlock(&lpEnvironment, NULL, TRUE)) {
-      dwFlags |= CREATE_UNICODE_ENVIRONMENT;
-    } else {
+    bSuccess = CreateProcessW((ReadEnvironmentVariable(L"ComSpec", buf, 2048) ? buf : L"cmd.exe"), cmdline ? cmdline : L"/d/x/v:off", NULL, NULL, TRUE, dwFlags, NULL, NULL, &si, &pi);
+    if (!bSuccess) {
       if (verbosity > 0) {
         dwErr = GetLastError();
-        fmt_error("[!] userenv:CreateEnvironmentBlock() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
+        fmt_error("[!] kernel32:CreateProcessW() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
+        perr("[!] Could not create elevated process. Exiting...\r\n");
       }
-      useenv = FALSE;
-      lpEnvironment = NULL;
-    }
-  }
-  if (access > 0) {
-    bSuccess = CreateProcessWithTokenW(hNewToken, LOGON_NETCREDENTIALS_ONLY, (ReadEnvironmentVariable(L"ComSpec", (wchar_t*)buf, 2048) ? (wchar_t*)buf : L"cmd.exe"), cmdline ? cmdline : L"/d/x/v:off", dwFlags, lpEnvironment, NULL, &si, &pi);
-  } else {
-    bSuccess = CreateProcessW((ReadEnvironmentVariable(L"ComSpec", (wchar_t*)buf, 2048) ? (wchar_t*)buf : L"cmd.exe"), cmdline ? cmdline : L"/d/x/v:off", NULL, NULL, TRUE, dwFlags, lpEnvironment, NULL, &si, &pi);
-  }
-  dwErr = GetLastError();
-  if (useenv) DestroyEnvironmentBlock(lpEnvironment);
-  if (cmdline) LocalFree(cmdline);
-  if (!bSuccess) {
-    if (verbosity > 0) {
-      if (access > 0) fmt_error("[!] advapi32:CreateProcessWithTokenW() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
-      else fmt_error("[!] kernel32:CreateProcessW() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
-      perr("[!] Could not create elevated process. Exiting...\r\n");
-    }
-    exit_code = -1;
-  } else {
-    if (verbosity == 2) perr("[+] Success\r\n");
-    if (!new) {
-      __stosb(buf, 0, 4096);
-      if (!pipe) {
-        hStdIn = GetStdHandle(STD_INPUT_HANDLE);
-        hStdOut = GetStdHandle(STD_OUTPUT_HANDLE);
-        hStdErr = GetStdHandle(STD_ERROR_HANDLE);
+    } else {
+      if (runas) {
+        bSuccess = !RunAs(buf, pi.dwProcessId, verbosity);
+      } else if (flags.f.access > 0) {
+        dwErr = NtSetInformationProcess(pi.hProcess, 9, &tokenInfo, sizeof(PROCESS_ACCESS_TOKEN));
+        if (dwErr && verbosity > 0) {
+          fmt_error("[!] ntdll:NtSetInformationProcess() failed; error code = 0x%1!08X!\r\n", (DWORD_PTR)dwErr, (DWORD_PTR)"");
+          perr("[!] Could not create elevated process. Exiting...\r\n");
+        }
+        bSuccess = !dwErr;
       }
-      MarioLoop(buf, pi.hProcess, out_read, err_read, hStdIn, hStdOut, hStdErr, in_write);
+      if (!bSuccess) {
+        TerminateProcess(pi.hProcess, (DWORD)-1);
+      } else {
+        if (verbosity == 2) perr("[+] Success\r\n");
+        ResumeThread(pi.hThread);
+        if (wait) {
+          WaitForSingleObject(pi.hProcess, INFINITE);
+          GetExitCodeProcess(pi.hProcess, &exit_code);
+        }
+      }
+      CloseHandle(pi.hThread);
+      CloseHandle(pi.hProcess);
     }
-  }
-
-  if (!new) {
-    CloseHandle(out_read);
-    out_read = INVALID_HANDLE_VALUE;
-    CloseHandle(err_read);
-    err_read = INVALID_HANDLE_VALUE;
-    CloseHandle(in_read);
-    in_read = INVALID_HANDLE_VALUE;
-    CloseHandle(out_write);
-    out_write = INVALID_HANDLE_VALUE;
-    CloseHandle(err_write);
-    err_write = INVALID_HANDLE_VALUE;
-    CloseHandle(in_write);
-    in_write = INVALID_HANDLE_VALUE;
-  }
-
-  if (pipe) {
-    CloseHandle(hStdOut);
-    hStdOut = INVALID_HANDLE_VALUE;
-    hStdErr = INVALID_HANDLE_VALUE;
-    CloseHandle(hStdIn);
-    hStdIn = INVALID_HANDLE_VALUE;
-  }
-
-  if (bSuccess) {
-    if (wait) {
-      WaitForSingleObject(pi.hProcess, INFINITE);
-      GetExitCodeProcess(pi.hProcess, &exit_code);
+    if (!bSuccess) {
+      exit_code = -1;
     }
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
+    if (cmdline) LocalFree(cmdline);
   }
-
-  if (access > 0) {
+  if (!runas && (flags.f.access > 0 || ppid)) {
     CloseHandle(hToken);
     CloseHandle(hNewToken);
   }
-
   ExitProcess(exit_code);
 }
