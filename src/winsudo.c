@@ -1337,6 +1337,13 @@ int main(void) {
         si.dwYCountChars = 300;
       }
     }
+    if (!runas && OSMajorVersion() < 10) { // stupid timing hack
+      SwitchToThread();
+      Sleep(0);
+      Sleep(66);
+      Sleep(0);
+      SwitchToThread();
+    }
     bSuccess = CreateProcessW((ReadEnvironmentVariable(L"ComSpec", buf, 2048) ? buf : L"cmd.exe"), cmdline ? cmdline : L"/d/x/v:off", NULL, NULL, TRUE, dwFlags, NULL, NULL, &si, &pi);
     if (!bSuccess) {
       if (verbosity > 0) {
